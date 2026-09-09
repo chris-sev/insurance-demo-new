@@ -4,7 +4,12 @@ import { eligibleJoiners, getCurrentBoard, listJoiners, withoutHost } from '@/li
 import { autoStartCibaFromHostPoll, pollCibaForClaim } from '@/lib/ciba-flow'
 import { getClaim, getLatestSubmittedClaim } from '@/lib/claims'
 import { isGoogleConnected } from '@/lib/google'
-import { getBoardSettings, hasCibaCatchUpLock, isCibaCatchUpWindow } from '@/lib/board-config'
+import {
+  getBoardSettings,
+  getDemoHost,
+  hasCibaCatchUpLock,
+  isCibaCatchUpWindow,
+} from '@/lib/board-config'
 import { hasLiveCiba } from '@/lib/ciba-store'
 import { getCibaBoardSnapshot } from '@/lib/snapshot'
 
@@ -25,22 +30,26 @@ export async function GET() {
     claim = (await pollCibaForClaim(claim.id, auth.session.user)) ?? claim
   }
 
-  const [joiners, board, googleConnected, rulesLocked, cibaLive, settings] = await Promise.all([
-    listJoiners(),
-    getCurrentBoard(),
-    isGoogleConnected(),
-    hasCibaCatchUpLock(),
-    hasLiveCiba(),
-    getBoardSettings(),
-  ])
+  const [joiners, board, googleConnected, rulesLocked, cibaLive, settings, demoHost] =
+    await Promise.all([
+      listJoiners(),
+      getCurrentBoard(),
+      isGoogleConnected(),
+      hasCibaCatchUpLock(),
+      hasLiveCiba(),
+      getBoardSettings(),
+      getDemoHost(),
+    ])
 
   return NextResponse.json(
     {
-      joiners: withoutHost(joiners),
+      joiners: withoutHost(joiners, demoHost),
       board,
       boardSize: settings.boardSize,
       yesThreshold: settings.yesThreshold,
-      verifiedCount: eligibleJoiners(joiners).length,
+      demoHostEmail: demoHost.email,
+      demoHostSub: demoHost.sub,
+      verifiedCount: eligibleJoiners(joiners, demoHost).length,
       canPick: !cibaLive,
       canChangeRules: !rulesLocked,
       googleConnected,

@@ -1,6 +1,6 @@
-import { getBoardSettings } from '@/lib/board-config'
+import { getBoardSettings, getDemoHost } from '@/lib/board-config'
 import { sql } from '@/lib/db'
-import { hostEmail, hostSub, isHostIdentity } from '@/lib/host'
+import { matchesDemoHost, type DemoHost } from '@/lib/host'
 
 export type Joiner = {
   sub: string
@@ -94,21 +94,20 @@ export async function getLatestPickId(): Promise<string | null> {
 
 export function withoutHost<T extends { sub: string; email?: string | null }>(
   members: T[],
+  host: DemoHost,
 ): T[] {
-  return members.filter((m) => !isHostIdentity(m.sub, m.email))
+  return members.filter((m) => !matchesDemoHost(host, m.sub, m.email))
 }
 
 /** Drop leftover operator seats from a pick. Host files the claim; they never CIBA it. */
-async function dropHostSeats(pickId: string): Promise<void> {
-  const sub = hostSub()
-  const email = hostEmail()
-  if (sub) {
-    await sql`delete from board_members where pick_id = ${pickId} and sub = ${sub}`
+async function dropHostSeats(pickId: string, host: DemoHost): Promise<void> {
+  if (host.sub) {
+    await sql`delete from board_members where pick_id = ${pickId} and sub = ${host.sub}`
   }
-  if (email) {
+  if (host.email) {
     await sql`
       delete from board_members
-      where pick_id = ${pickId} and lower(email) = ${email}
+      where pick_id = ${pickId} and lower(email) = ${host.email}
     `
   }
 }
@@ -116,20 +115,22 @@ async function dropHostSeats(pickId: string): Promise<void> {
 export async function getCurrentBoard(): Promise<BoardMember[]> {
   const pickId = await getLatestPickId()
   if (!pickId) return []
-  await dropHostSeats(pickId)
+  const host = await getDemoHost()
+  await dropHostSeats(pickId, host)
   const rows = (await sql`
     select sub, email, name from board_members
     where pick_id = ${pickId}
     order by name
   `) as BoardMember[]
-  return withoutHost(rows)
+  return withoutHost(rows, host)
 }
 
 export async function isOnCurrentBoard(
   sub: string,
   email?: string | null,
 ): Promise<boolean> {
-  if (isHostIdentity(sub, email)) return false
+  const host = await getDemoHost()
+  if (matchesDemoHost(host, sub, email)) return false
   const board = await getCurrentBoard()
   if (board.some((m) => m.sub === sub)) return true
   const needle = email?.trim().toLowerCase()
@@ -152,8 +153,8 @@ function shuffle<T>(items: T[]): T[] {
 }
 
 /** Verified, non-host joiners — the only people who can sit on the CIBA board. */
-export function eligibleJoiners(joiners: Joiner[]): Joiner[] {
-  return joiners.filter((j) => j.emailVerified && !isHostIdentity(j.sub, j.email))
+export function eligibleJoiners(joiners: Joiner[], host: DemoHost): Joiner[] {
+  return joiners.filter((j) => j.emailVerified && !matchesDemoHost(host, j.sub, j.email))
 }
 
 /**
@@ -162,24 +163,27 @@ export function eligibleJoiners(joiners: Joiner[]): Joiner[] {
  * of the seats are shuffled in. The host is never seated — they file
  * the claim, they don't CIBA it.
  */
-export function selectBoard(joiners: Joiner[], size: number): Joiner[] {
-  const eligible = eligibleJoiners(joiners)
+export function selectBoard(joiners: Joiner[], size: number, host: DemoHost): Joiner[] {
+  const eligible = eligibleJoiners(joiners, host)
   const pinned = eligible.filter((j) => j.pinned)
   const rest = shuffle(eligible.filter((j) => !j.pinned))
   return [...pinned, ...rest].slice(0, size)
 }
 
 export async function pickBoard(pickedBy: string): Promise<BoardMember[]> {
-  const { boardSize: size } = await getBoardSettings()
-  const joiners = await listJoiners()
-  const eligible = eligibleJoiners(joiners)
+  const [{ boardSize: size }, joiners, host] = await Promise.all([
+    getBoardSettings(),
+    listJoiners(),
+    getDemoHost(),
+  ])
+  const eligible = eligibleJoiners(joiners, host)
   if (eligible.length < size) {
     throw new Error(
       `Need ${size} verified joiners to pick a board. Currently ${eligible.length}.`,
     )
   }
-  const selected = withoutHost(selectBoard(joiners, size))
-  if (selected.length !== size || selected.some((m) => isHostIdentity(m.sub, m.email))) {
+  const selected = withoutHost(selectBoard(joiners, size, host), host)
+  if (selected.length !== size || selected.some((m) => matchesDemoHost(host, m.sub, m.email))) {
     throw new Error(
       `Need ${size} verified joiners to pick a board. Currently ${selected.length}. The operator cannot sit.`,
     )

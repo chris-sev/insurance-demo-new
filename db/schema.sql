@@ -72,11 +72,15 @@ create table if not exists demo_settings (
   yes_threshold integer     not null default 1
                   check (yes_threshold >= 1 and yes_threshold <= board_size),
   defaults_version integer  not null default 2,
+  demo_host_email text,
+  demo_host_sub   text,
   updated_at    timestamptz not null default now(),
   updated_by    text
 );
 
 alter table demo_settings add column if not exists defaults_version integer not null default 1;
+alter table demo_settings add column if not exists demo_host_email text;
+alter table demo_settings add column if not exists demo_host_sub text;
 alter table demo_settings alter column board_size set default 1;
 alter table demo_settings alter column yes_threshold set default 1;
 

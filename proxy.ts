@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { auth0 } from '@/lib/auth0'
-import { isDemoHost } from '@/lib/host'
+import { isAdmin } from '@/lib/host'
 
 /**
  * Next.js 16 renamed Middleware to Proxy. This mounts the Auth0 v4 routes
@@ -14,7 +14,7 @@ export async function proxy(request: NextRequest) {
   // Token Vault connect is host-only. Audience never hits Google consent.
   if (pathname.startsWith('/auth/connect')) {
     const session = await auth0.getSession(request)
-    if (!session || !isDemoHost(session.user)) {
+    if (!session || !isAdmin(session.user)) {
       return NextResponse.redirect(`${origin}/join`)
     }
     return authRes

@@ -2,10 +2,10 @@ import { NextResponse } from 'next/server'
 import { emailVerifiedFromUser } from '@/lib/auth0'
 import { requireSession } from '@/lib/api-auth'
 import { getJoiner, isOnCurrentBoard, upsertJoiner } from '@/lib/board'
-import { getBoardSettings } from '@/lib/board-config'
+import { getBoardSettings, getDemoHost } from '@/lib/board-config'
 import { getCibaForSub } from '@/lib/ciba-store'
 import { getLatestSubmittedClaim } from '@/lib/claims'
-import { isDemoHost, isHostIdentity } from '@/lib/host'
+import { matchesDemoHost } from '@/lib/host'
 
 export const dynamic = 'force-dynamic'
 
@@ -27,15 +27,16 @@ async function joinPayload(
   const joiner = extra && 'joiner' in extra ? extra.joiner : await getJoiner(user.sub)
   const onBoard = extra?.skipped === 'host' ? false : await isOnCurrentBoard(user.sub, email)
   const claim = await getLatestSubmittedClaim()
-  const [ciba, settings] = await Promise.all([
+  const [ciba, settings, host] = await Promise.all([
     claim && extra?.skipped !== 'host'
       ? getCibaForSub(claim.id, user.sub)
       : Promise.resolve(null),
     getBoardSettings(),
+    getDemoHost(),
   ])
 
   return {
-    host: isDemoHost(user),
+    host: matchesDemoHost(host, user.sub, email),
     joiner: joiner ?? null,
     onBoard,
     emailVerified: emailVerifiedFromUser(user as Record<string, unknown>),
@@ -64,7 +65,8 @@ export async function POST() {
   const name = typeof user.name === 'string' && user.name ? user.name : email || 'Joiner'
   const emailVerified = emailVerifiedFromUser(user)
 
-  if (isHostIdentity(user.sub, email)) {
+  const host = await getDemoHost()
+  if (matchesDemoHost(host, user.sub, email)) {
     return NextResponse.json(await joinPayload(user, { joiner: null, skipped: 'host' }), {
       headers: NO_STORE,
     })

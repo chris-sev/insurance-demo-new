@@ -1,15 +1,18 @@
 # Setup
 
 Everything this app needs to run locally: **three sets of secrets** (Auth0, Neon,
-Anthropic), **one schema migration**, and two Auth0 add-ons the stage demo
-depends on — **CIBA email** (`requested_expiry=600`) and **Token Vault** for
-the host's Google Calendar. Nothing else — no second app, no build step beyond
-`pnpm dev`.
+Vercel AI Gateway), **one schema migration**, and two Auth0 add-ons the stage
+demo depends on — **CIBA email** (`requested_expiry=600`) and **Token Vault**
+for the host's Google Calendar. Nothing else — no second app, no build step
+beyond `pnpm dev`.
 
 This document is written for a coding agent working with a human who has the
 accounts. An agent can do most of this end-to-end; the two things it cannot do
-alone are read secrets out of the Auth0 dashboard and mint an Anthropic API key.
-Ask for those, don't guess.
+alone are read secrets out of the Auth0 dashboard and mint an AI Gateway key
+(unless the project is already `vercel link`ed). Ask for those, don't guess.
+
+Human-facing context (what the app is, suggested MCPs, CIBA dashboard
+steps, admin vs demo host): **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 > **Never print a filled-in `.env.local` back into the chat, a commit, or a PR
 > description.** `.gitignore` already excludes `.env*` except `.env.example`.
@@ -107,11 +110,13 @@ Without the Action nothing breaks — [lib/auth0.ts](lib/auth0.ts) falls back to
 `AUTH0_AUDIENCE` in `.env.example` stays commented out. It is only needed if you
 want an access token for a *separate* API; this app has none.
 
-`DEMO_HOST_EMAIL` or `DEMO_HOST_SUB` is **required**. The host gate fails
-closed if both are empty — nobody can pick the board, start CIBA, or connect
-Google. Set Focus's email (and `sub` once you have it) so audience logins
-cannot operate the console. Token Vault calendar writes additionally require
-the current session `sub` to match `DEMO_HOST_SUB` when that env is set.
+**Admin access** is email-based, not env-based. A login whose email is
+`@okta.com` or `admin@focusotter.com` can open `/host` and `/settings`.
+On `/host` they save **demo host** email + Auth0 `sub` (sub defaults to
+their own). That identity is excluded from the board; calendar writes
+require the current session `sub` to match the saved demo host sub.
+`DEMO_HOST_EMAIL` / `DEMO_HOST_SUB` in `.env.local` are an optional seed
+until someone saves on `/host`.
 
 ### Board size and CIBA yes threshold
 
@@ -123,7 +128,7 @@ seed on first load; a later host save of 6 / 3 is kept. Threshold must be
 ≥ 1 and ≤ board size.
 
 The host console shows `N/{size}` and disables Pick until verified (non-host)
-joiners ≥ the saved size. The configured host (`DEMO_HOST_EMAIL` / `DEMO_HOST_SUB`)
+joiners ≥ the saved size. The configured demo host (saved on `/host`)
 is never seated. `POST /api/board/pick` replaces the current board until CIBA
 is live and rejects a short room. CIBA start emails only seated joiner `sub`s
 (`login_hint` `iss_sub`) and refuses a board that is empty, host-only, or not
@@ -132,9 +137,11 @@ after yeses ≥ the saved threshold.
 
 ### CIBA email grant
 
-CIBA is not on the Free plan. Enable **Client Initiated Backchannel
-Authentication** on this Regular Web App and select the **email** channel
-(not Guardian). The loop lives in [lib/ciba.ts](lib/ciba.ts), copied from
+CIBA email is not on the Free plan. You need **Essentials (or
+Professional) + the Auth0 for AI Agents add-on**. Dashboard steps —
+grant type, email channel, Asynchronous Approval template — are in
+[CONTRIBUTING.md](CONTRIBUTING.md#auth0-ciba-dashboard). The loop lives
+in [lib/ciba.ts](lib/ciba.ts), copied from
 [mtliendo/ciba-email](https://github.com/mtliendo/ciba-email) — we do **not**
 use `@auth0/ai`.
 
@@ -218,24 +225,37 @@ psql "$DATABASE_URL" -f db/schema.sql
 | `demo_joiners` | — | QR joiners (`sub`, email, name, verified, pinned) |
 | `board_picks` / `board_members` | — | Latest pick of the saved size |
 | `ciba_authorizations` | — | `{authReqId, sub, email, name, status}` per seat |
-| `demo_settings` | — | Host-saved board size and CIBA yes threshold (default 1 / 1) |
+| `demo_settings` | — | Host-saved board size, CIBA yes threshold (default 1 / 1), and demo host email/sub |
 
 ---
 
-## 3. Anthropic API key
+## 3. Vercel AI Gateway
 
-Drives the claims agent in [lib/agent/](lib/agent/). Ask the human for a key from
-[console.anthropic.com](https://console.anthropic.com/settings/keys) — an agent
-cannot mint one.
+Drives the claims agent in [lib/agent/](lib/agent/) through the Vercel AI
+SDK. Default model is `anthropic/claude-opus-5`. Do not set
+`ANTHROPIC_API_KEY` — that bypasses the gateway.
 
-```dotenv
-ANTHROPIC_API_KEY=sk-ant-...
+**Option A — OIDC (Vercel-linked project)**
+
+```bash
+vercel link
+# Enable AI Gateway on the Vercel project settings
+vercel env pull .env.local --yes   # writes VERCEL_OIDC_TOKEN (~24h)
 ```
 
-The agent calls `claude-opus-5` at `effort: 'low'` ([lib/agent/run.ts](lib/agent/run.ts)).
-The key must belong to a workspace with credit; a `401`/`400` from the chat route
-shows up in the UI as *"Sorry, I encountered an error."* and in the server log as
-`Agent error:`.
+**Option B — static key (ask the human)**
+
+Create a key at
+[vercel.com/…/ai-gateway/api-keys](https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys):
+
+```dotenv
+AI_GATEWAY_API_KEY=
+# optional:
+# AI_GATEWAY_MODEL=anthropic/claude-opus-5
+```
+
+A `401`/`400` from the chat route shows up in the UI as *"Sorry, I
+encountered an error."* and in the server log as `Agent error:`.
 
 ---
 
@@ -275,12 +295,12 @@ Then walk the happy path:
 | Redirect loop at `/auth/login` | `APP_BASE_URL` doesn't match the URL you're browsing, or `AUTH0_SECRET` is missing/short |
 | `Callback URL mismatch` from Auth0 | Allowed Callback URL must be exactly `http://localhost:3000/auth/callback` |
 | Sign-in works but every page 401s | App created as a SPA — recreate it as a Regular Web Application |
-| Agent replies "Sorry, I encountered an error" | Bad or unfunded `ANTHROPIC_API_KEY`; check the server log for `Agent error:` |
+| Agent replies "Sorry, I encountered an error" | Missing/expired `AI_GATEWAY_API_KEY` or `VERCEL_OIDC_TOKEN`; check the server log for `Agent error:` |
 | `relation "claims" does not exist` | Step 2's migration never ran against the branch this `DATABASE_URL` points at |
 | Approvals never release the claim | Need the host-saved yes threshold (default 1) from the seated board (default 1). Raise both on `/host` for the talk. |
-| Host console 503 / nobody is host | `DEMO_HOST_EMAIL` and `DEMO_HOST_SUB` are both empty — the gate fails closed |
+| Host console 403 / redirected to /join | Login email is not `@okta.com` or `admin@focusotter.com` |
 | CIBA emails never send | `/host` is not open (auto-start is the host poll), host has not connected Google, no board picked, leftover host-only seat, or `requested_expiry` is ≤300 (Guardian) |
-| CIBA emailed the operator | Leftover `board_members` row for `DEMO_HOST`; Start over now clears the seated board. Pick replaces until CIBA is live. |
+| CIBA emailed the presenter | Demo host not saved on `/host`, or leftover `board_members` row; Start over clears the seated board |
 | Auth0 `slow_down` on stage | Polls must honor stored `interval_sec` (floor 5). Do not reset after `authorization_pending`. |
 | Board member missing from pick | Email not verified on the Auth0 user, or they are the configured host |
 | Calendar event missing after the threshold yeses | Token Vault Google connection dropped; reconnect on `/settings` |

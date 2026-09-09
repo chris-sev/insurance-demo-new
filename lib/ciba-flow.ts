@@ -25,9 +25,10 @@ import {
   freezeCibaBoardRules,
   frozenBoardRules,
   getBoardSettings,
+  getDemoHost,
   isFullBoard,
 } from '@/lib/board-config'
-import { canWriteHostCalendar, isDemoHost, isHostIdentity } from '@/lib/host'
+import { canWriteHostCalendar, isAdmin, matchesDemoHost } from '@/lib/host'
 import type { CibaAutoStart, Claim } from '@/lib/types'
 
 export type { CibaAutoStart, CibaStartFailReason } from '@/lib/types'
@@ -149,7 +150,7 @@ export async function startCibaForSubmittedClaim(claimId: string): Promise<CibaS
   }
 
   const session = await auth0.getSession()
-  if (!session || !isDemoHost(session.user)) {
+  if (!session || !isAdmin(session.user)) {
     return { ok: false, reason: 'not_host' }
   }
 
@@ -161,9 +162,9 @@ export async function startCibaForSubmittedClaim(claimId: string): Promise<CibaS
   const claim = await getClaim(claimId)
   if (!claim) return { ok: false, reason: 'no_board', seated: 0 }
 
-  const live = await getBoardSettings()
+  const [live, host] = await Promise.all([getBoardSettings(), getDemoHost()])
   const intended = frozenBoardRules(claim) ?? live
-  const board = withoutHost(await getCurrentBoard())
+  const board = withoutHost(await getCurrentBoard(), host)
   if (!isFullBoard(board.length, intended.boardSize)) {
     await setCibaBlockReason(claimId, 'no_board')
     return boardSizeFail(board.length, intended.boardSize)
@@ -180,7 +181,7 @@ export async function startCibaForSubmittedClaim(claimId: string): Promise<CibaS
   let started = 0
 
   for (const member of board) {
-    if (isHostIdentity(member.sub, member.email)) continue
+    if (matchesDemoHost(host, member.sub, member.email)) continue
     try {
       const result = await startCiba(member.sub, bindingMessage)
       const expiresAt = new Date(Date.now() + result.expiresIn * 1000)
@@ -261,7 +262,7 @@ export async function pollCibaForClaim(
   const approved = await countCibaApproved(claimId)
   if (approved >= rules.yesThreshold) {
     await approveClaim(claimId)
-    if (canWriteHostCalendar(actor)) {
+    if (canWriteHostCalendar(actor, await getDemoHost())) {
       await writeHostCalendarEvent(claimId)
     }
   }

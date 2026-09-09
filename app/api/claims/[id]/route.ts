@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import { auth0 } from '@/lib/auth0'
 import { pollCibaForClaim } from '@/lib/ciba-flow'
 import { getClaim } from '@/lib/claims'
-import { isDemoHost } from '@/lib/host'
+import { isAdmin } from '@/lib/host'
 import { isCibaCatchUpWindow } from '@/lib/board-config'
 import { buildClaimSnapshot } from '@/lib/snapshot'
 import type { ClaimSnapshot } from '@/lib/types'
@@ -31,7 +31,7 @@ export async function GET(
     return NextResponse.json({ error: 'Not found' }, { status: 404 })
   }
 
-  const hostPolling = isDemoHost(session.user)
+  const hostPolling = isAdmin(session.user)
   if (hostPolling && isCibaCatchUpWindow(claim)) {
     claim = (await pollCibaForClaim(claim.id, session.user)) ?? claim
   }

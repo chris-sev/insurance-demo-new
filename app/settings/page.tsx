@@ -2,7 +2,7 @@ import { redirect } from 'next/navigation'
 import { auth0 } from '@/lib/auth0'
 import { getBoardSettings } from '@/lib/board-config'
 import { isGoogleConnected } from '@/lib/google'
-import { isDemoHost } from '@/lib/host'
+import { isAdmin } from '@/lib/host'
 import { SiteNav } from '@/components/site-nav'
 import { SettingsClient } from '@/components/settings-client'
 
@@ -17,7 +17,7 @@ export default async function SettingsPage({
 }) {
   const session = await auth0.getSession()
   if (!session) redirect('/auth/login?returnTo=/settings')
-  if (!isDemoHost(session.user)) redirect('/join')
+  if (!isAdmin(session.user)) redirect('/join')
 
   const params = await searchParams
   const error = typeof params.error === 'string' ? params.error : null

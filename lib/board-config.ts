@@ -1,6 +1,11 @@
 import 'server-only'
 import { sql } from '@/lib/db'
 import {
+  envHostEmail,
+  envHostSub,
+  type DemoHost,
+} from '@/lib/host'
+import {
   DEFAULT_BOARD_SIZE,
   DEFAULT_CIBA_YES_THRESHOLD,
   MAX_BOARD_SIZE,
@@ -20,6 +25,8 @@ const DEFAULTS: BoardSettings = {
 type SettingsRow = {
   board_size: number
   yes_threshold: number
+  demo_host_email?: string | null
+  demo_host_sub?: string | null
 }
 
 /**
@@ -67,6 +74,8 @@ export async function ensureBoardRulesSchema(): Promise<void> {
   `
   await sql`alter table claims add column if not exists ciba_board_size integer`
   await sql`alter table claims add column if not exists ciba_yes_threshold integer`
+  await sql`alter table demo_settings add column if not exists demo_host_email text`
+  await sql`alter table demo_settings add column if not exists demo_host_sub text`
   schemaReady = true
 }
 
@@ -102,6 +111,60 @@ export async function getBoardSettings(): Promise<BoardSettings> {
   } catch {
     return DEFAULTS
   }
+}
+
+function trimOrNull(value: string | null | undefined): string | null {
+  const next = value?.trim()
+  return next ? next : null
+}
+
+/**
+ * Presenter identity for board exclusion and the host calendar write.
+ * Saved on /host; env is only a seed until someone saves.
+ */
+export async function getDemoHost(): Promise<DemoHost> {
+  await ensureBoardRulesSchema()
+  const rows = (await sql`
+    select demo_host_email, demo_host_sub from demo_settings
+    where singleton = true
+    limit 1
+  `) as SettingsRow[]
+  const row = rows[0]
+  return {
+    email: trimOrNull(row?.demo_host_email)?.toLowerCase() ?? envHostEmail(),
+    sub: trimOrNull(row?.demo_host_sub) ?? envHostSub(),
+  }
+}
+
+export async function saveDemoHost(input: {
+  email: string | null
+  sub: string | null
+  updatedBy: string
+}): Promise<DemoHost> {
+  await ensureBoardRulesSchema()
+  const email = trimOrNull(input.email)?.toLowerCase() ?? null
+  const sub = trimOrNull(input.sub)
+  await sql`
+    insert into demo_settings (
+      singleton, board_size, yes_threshold, demo_host_email, demo_host_sub,
+      updated_by, updated_at
+    )
+    values (
+      true,
+      ${DEFAULTS.boardSize},
+      ${DEFAULTS.yesThreshold},
+      ${email},
+      ${sub},
+      ${input.updatedBy},
+      now()
+    )
+    on conflict (singleton) do update set
+      demo_host_email = excluded.demo_host_email,
+      demo_host_sub = excluded.demo_host_sub,
+      updated_by = excluded.updated_by,
+      updated_at = now()
+  `
+  return { email, sub }
 }
 
 export async function saveBoardSettings(input: {

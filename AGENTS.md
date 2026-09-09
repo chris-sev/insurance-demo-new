@@ -1,10 +1,10 @@
 # Hero Shield Insurance — agent notes
 
-Before running or debugging this app, read [SETUP.md](SETUP.md). It covers the
-three secret sets the app cannot start without (Auth0, Neon `DATABASE_URL`,
-`ANTHROPIC_API_KEY`) and tells you to provision the database with the **Neon MCP
-server** rather than the console. [README.md](README.md) explains what the app
-actually does.
+Before running or debugging this app, read [CONTRIBUTING.md](CONTRIBUTING.md)
+and [SETUP.md](SETUP.md). The app needs **Auth0**, **Neon `DATABASE_URL`**, and
+the **Vercel AI Gateway** (`AI_GATEWAY_API_KEY` or a `VERCEL_OIDC_TOKEN` from
+`vercel env pull`). Provision the database with the **Neon MCP server** rather
+than the console. [README.md](README.md) explains what the app actually does.
 
 Never echo `.env.local` values into chat, commits, or PR descriptions.
 

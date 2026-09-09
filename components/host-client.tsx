@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
-import { CalendarCheck, Pin, PinOff, QrCode, Shuffle, SlidersHorizontal, TriangleAlert } from 'lucide-react'
+import { CalendarCheck, Pin, PinOff, QrCode, Shuffle, SlidersHorizontal, TriangleAlert, UserRound } from 'lucide-react'
 import { BoardPanel } from '@/components/board-panel'
 import { ClearClaimButton } from '@/components/clear-claim-button'
 import { Badge } from '@/components/ui/badge'
@@ -34,6 +34,8 @@ type BoardState = {
   canPick: boolean
   canChangeRules?: boolean
   googleConnected: boolean
+  demoHostEmail: string | null
+  demoHostSub: string | null
   cibaAutoStart?: CibaAutoStart | null
   claim: {
     id: string
@@ -50,18 +52,26 @@ const POLL_MS = 2000
 export function HostClient({
   qrDataUrl,
   joinUrl,
+  sessionEmail,
+  sessionSub,
 }: {
   qrDataUrl: string
   joinUrl: string
+  sessionEmail: string
+  sessionSub: string
 }) {
   const [state, setState] = useState<BoardState | null>(null)
   const [picking, setPicking] = useState(false)
   const [starting, setStarting] = useState(false)
   const [savingRules, setSavingRules] = useState(false)
+  const [savingHost, setSavingHost] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [draftSize, setDraftSize] = useState(DEFAULT_BOARD_SIZE)
   const [draftThreshold, setDraftThreshold] = useState(DEFAULT_CIBA_YES_THRESHOLD)
+  const [draftHostEmail, setDraftHostEmail] = useState(sessionEmail)
+  const [draftHostSub, setDraftHostSub] = useState(sessionSub)
   const syncedRules = useRef<string | null>(null)
+  const syncedHost = useRef<string | null>(null)
 
   const load = useCallback(async () => {
     const res = await fetch(`/api/board?ts=${Date.now()}`, { cache: 'no-store' })
@@ -77,7 +87,13 @@ export function HostClient({
       setDraftSize(next.boardSize)
       setDraftThreshold(next.yesThreshold)
     }
-  }, [])
+    const hostKey = `${next.demoHostEmail ?? ''}:${next.demoHostSub ?? ''}`
+    if (syncedHost.current !== hostKey) {
+      syncedHost.current = hostKey
+      setDraftHostEmail(next.demoHostEmail || sessionEmail)
+      setDraftHostSub(next.demoHostSub || sessionSub)
+    }
+  }, [sessionEmail, sessionSub])
 
   useEffect(() => {
     let active = true
@@ -146,6 +162,25 @@ export function HostClient({
     }
   }
 
+  const saveHost = async () => {
+    setSavingHost(true)
+    try {
+      const res = await fetch('/api/board/host', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: draftHostEmail, sub: draftHostSub }),
+      })
+      const body = await res.json()
+      if (!res.ok) throw new Error(body.error || 'Save failed')
+      syncedHost.current = null
+      await load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Save failed')
+    } finally {
+      setSavingHost(false)
+    }
+  }
+
   const startCiba = async () => {
     setStarting(true)
     try {
@@ -178,6 +213,11 @@ export function HostClient({
     draftThreshold > draftSize
   const rulesDirty =
     state != null && (draftSize !== state.boardSize || draftThreshold !== state.yesThreshold)
+  const savedHostEmail = state?.demoHostEmail ?? ''
+  const savedHostSub = state?.demoHostSub ?? ''
+  const hostDirty =
+    draftHostEmail.trim().toLowerCase() !== savedHostEmail || draftHostSub.trim() !== savedHostSub
+  const hostIncomplete = !draftHostEmail.trim() && !draftHostSub.trim()
   const blockReason = state?.claim?.board.blockReason
   const autoStart = state?.cibaAutoStart ?? null
   const members = state?.claim?.board.members ?? []
@@ -229,7 +269,7 @@ export function HostClient({
       <div className="relative mx-auto max-w-6xl">
         <div className="animate-rise mb-8 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
           <div>
-            <span className="hud-label">Operator console · Focus</span>
+            <span className="hud-label">Operator console · Admin</span>
             <h1 className="mt-2 font-display text-3xl font-bold uppercase tracking-tight md:text-4xl">
               CIBA board
             </h1>
@@ -301,6 +341,61 @@ export function HostClient({
                 </CardContent>
               </Card>
             )}
+
+            <Card className="hud-panel animate-rise stagger-1 rounded-none border-transparent">
+              <CardHeader className="pt-5">
+                <CardTitle className="flex items-center gap-2 text-base uppercase">
+                  <UserRound className="h-4 w-4 text-hud" />
+                  Demo host
+                </CardTitle>
+                <CardDescription>
+                  The presenter on stage — excluded from the CIBA board, and the
+                  Google Calendar that receives the approved-claim event. Sub
+                  defaults to your Auth0 <span className="font-mono">sub</span>.
+                </CardDescription>
+              </CardHeader>
+              <Separator />
+              <CardContent className="space-y-4 pt-4">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <label className="space-y-1.5 text-sm">
+                    <span className="hud-label text-[0.6rem]">Demo host email</span>
+                    <input
+                      type="email"
+                      value={draftHostEmail}
+                      onChange={(e) => setDraftHostEmail(e.target.value)}
+                      placeholder={sessionEmail || 'presenter@okta.com'}
+                      className="w-full rounded-md border border-input bg-background/60 px-3 py-2 text-sm focus:border-hud/60 focus:outline-none focus:ring-2 focus:ring-hud/30"
+                    />
+                  </label>
+                  <label className="space-y-1.5 text-sm">
+                    <span className="hud-label text-[0.6rem]">Demo host sub</span>
+                    <input
+                      type="text"
+                      value={draftHostSub}
+                      onChange={(e) => setDraftHostSub(e.target.value)}
+                      placeholder={sessionSub}
+                      className="w-full rounded-md border border-input bg-background/60 px-3 py-2 font-mono text-sm focus:border-hud/60 focus:outline-none focus:ring-2 focus:ring-hud/30"
+                    />
+                  </label>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Console access is separate: any <span className="font-mono">@okta.com</span>{' '}
+                  login or <span className="font-mono">admin@focusotter.com</span> can
+                  operate this page. Only this identity is kept off the board.
+                </p>
+                {hostIncomplete && (
+                  <p className="text-xs text-gold">
+                    Save the presenter email or Auth0 sub before you pick a board.
+                  </p>
+                )}
+                <Button
+                  onClick={() => void saveHost()}
+                  disabled={savingHost || hostIncomplete || !hostDirty}
+                >
+                  {savingHost ? 'Saving…' : 'Save demo host'}
+                </Button>
+              </CardContent>
+            </Card>
 
             <Card className="hud-panel animate-rise stagger-1 rounded-none border-transparent">
               <CardHeader className="pt-5">
