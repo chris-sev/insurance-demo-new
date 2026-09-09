@@ -1,7 +1,8 @@
+import { headers } from 'next/headers'
 import { redirect } from 'next/navigation'
 import { auth0 } from '@/lib/auth0'
 import { isAdmin } from '@/lib/host'
-import { joinQrDataUrl, joinUrlFromBase } from '@/lib/qr'
+import { joinQrDataUrl, joinUrlFromHeaders } from '@/lib/qr'
 import { SiteNav } from '@/components/site-nav'
 import { HostClient } from '@/components/host-client'
 
@@ -14,8 +15,7 @@ export default async function HostPage() {
   if (!session) redirect('/auth/login?returnTo=/host')
   if (!isAdmin(session.user)) redirect('/join')
 
-  const base = process.env.APP_BASE_URL ?? 'http://localhost:3000'
-  const joinUrl = joinUrlFromBase(base)
+  const joinUrl = joinUrlFromHeaders(await headers())
   const qrDataUrl = await joinQrDataUrl(joinUrl)
 
   return (
