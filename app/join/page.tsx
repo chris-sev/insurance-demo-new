@@ -20,7 +20,6 @@ export default async function JoinPage({
       <AudienceNav />
       {session ? (
         <JoinClient
-          userName={session.user.name ?? session.user.email ?? 'there'}
           userEmail={typeof session.user.email === 'string' ? session.user.email : ''}
           authError={error}
         />

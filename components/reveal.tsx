@@ -33,6 +33,8 @@ export function Reveal({
     // mount — a tall viewport or a restored scroll position puts most of the
     // page in view before a single scroll event fires.
     if (typeof IntersectionObserver === 'undefined') {
+      // Deliberate: the markup ships hidden, so this must flip on mount.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setShown(true)
       return
     }

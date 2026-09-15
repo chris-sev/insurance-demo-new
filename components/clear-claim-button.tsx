@@ -10,9 +10,11 @@ const CONFIRM =
 export function ClearClaimButton({
   onCleared,
   size = 'sm',
+  variant = 'destructive',
 }: {
   onCleared: () => Promise<void>
   size?: 'sm' | 'default'
+  variant?: 'destructive' | 'outline'
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -37,7 +39,7 @@ export function ClearClaimButton({
     <div className="flex flex-col items-end gap-1">
       <Button
         type="button"
-        variant="destructive"
+        variant={variant}
         size={size}
         onClick={() => void run()}
         disabled={busy}

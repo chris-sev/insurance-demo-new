@@ -143,3 +143,16 @@ alter table claims add column if not exists ciba_block_reason text;
 -- Frozen at CIBA start so a later /host save cannot change the grant.
 alter table claims add column if not exists ciba_board_size integer;
 alter table claims add column if not exists ciba_yes_threshold integer;
+
+-- Showcase claim (Claims Supervisor demo path). requested_amount is not
+-- null only for a showcase claim; a chat-filed /file-claim row leaves it
+-- null. stages is the live specialist-stage log the projector polls.
+alter table claims add column if not exists requested_amount numeric(12,2);
+alter table claims add column if not exists customer_name text;
+alter table claims add column if not exists stages jsonb not null default '[]';
+alter table claims add column if not exists decision text;
+
+-- Audience request typed on /join, echoed in the /host queue.
+alter table demo_joiners add column if not exists requested_amount numeric(12,2);
+alter table demo_joiners add column if not exists incident_reason text;
+alter table demo_joiners add column if not exists requested_at timestamptz;

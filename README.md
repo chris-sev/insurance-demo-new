@@ -42,34 +42,46 @@ CIBA setup, plan requirements, and Token Vault steps:
 ## What the demo does
 
 1. **The room scans one QR.** `/join` sends everyone through Auth0 Universal
-   Login so we have `sub`, email, and name. An unverified email can watch the
-   room; it cannot sit on the CIBA board.
-2. **The presenter picks the board.** An `@okta.com` or
-   `admin@focusotter.com` login opens `/host`. They save themselves as
-   **demo host** (email + Auth0 `sub`; sub defaults to theirs). The console
-   randomly seats the saved board size of verified (non-host) joiners
-   (default 1; raise to 6 for the talk). The configured host is never
-   seated. Joiner phones flip to "you're on the board."
-3. **The filer files the claim in chat.** `/file-claim` is the claims
-   agent (white 2006 Honda Pilot, Hulk-smashed car) via the Vercel AI
-   Gateway. Confirm submission flips the row to `awaiting_approval`. The
-   open `/host` console starts CIBA automatically on its next poll.
-4. **CIBA email goes to the seated board, not the room, and never the host.**
-   If the host has not connected Google Calendar, we refuse to send. We
-   `POST /bc-authorize` per seated member (`login_hint` `iss_sub`,
-   `requested_expiry=600`) and store `{authReqId, sub, email, name, status}`.
-   The projector ticks as they Accept or Decline.
-5. **CIBA yeses at the saved threshold release the claim.** Then we write
-   one event on the **host** Google Calendar with Token Vault
-   (`getAccessTokenForConnection({ connection: 'google-oauth2' })`).
+   Login, then asks one thing: an amount and a short reason for the claim
+   ("Hulk threw my car."). Submitting flips the phone to "You're in" and
+   echoes the room's live totals. Unverified emails can submit a request;
+   only the human approver seat needs a verified email.
+2. **The operator picks the showcase request.** An admin login (`@okta.com`,
+   `admin@focusotter.com`, or an email listed in `DEMO_ADMIN_EMAILS`) opens
+   `/host` and taps **Pick showcase request**. The pick is deterministic:
+   the room's largest requested amount, tie broken by earliest submission,
+   or a specific request via its row's "Pick this" button.
+3. **The Claims Supervisor runs five specialist stages.**
+   [lib/agent/supervisor.ts](lib/agent/supervisor.ts) is **one** Vercel AI
+   SDK `generateText` loop, not a multi-agent runtime. It calls five tools
+   in a fixed order (Policy, Coverage, Risk, Repair, and Customer Update
+   Specialist), and each call appends one stage row the `/host` projector
+   polls live. A 45s timeout with templated fallbacks means the stage never
+   stalls in front of a room.
+4. **Policy code decides, never the model.** Requests at or below
+   **$100,000** auto-approve. Above that, the claim becomes an exception
+   and crosses the human authority boundary.
+5. **CIBA sends one email.** For an exception claim, the open `/host`
+   console starts CIBA automatically: one asynchronous approval email to
+   the seated human approver (board size **1** by default). The room's
+   other requests stay visible as a queue so participation still pays off.
+   If the host has not connected Google Calendar, CIBA is withheld, since a
+   yes would have nowhere to write the calendar event.
+6. **Approval schedules a Token Vault event.** Once a showcase claim is
+   approved, whether by the human approver or automatically under the
+   threshold, the Repair Specialist's calendar event lands on the host's
+   Google Calendar: `Repair inspection — claim HS-XXXX`.
+7. **The show closes on one line:** "Every agent has a principal. Every
+   delegation is scoped. Real authority crosses a human boundary."
+8. **The chat path is still there.** `/file-claim` is the original claims
+   agent chat flow (white 2006 Honda Pilot, Hulk-smashed car); it shows on
+   `/host` whenever no showcase claim exists.
 
-![Audience join — Auth0 login required to sit on the CIBA board](docs/images/join.jpg)
-
-The CIBA board is the grant.
+![Audience join: submit an amount and reason, then "You're in"](docs/images/join.jpg)
 
 The interesting part is that **every one of those steps is a row in Postgres**.
-Refresh mid-claim and you resume exactly where you were; the board and CIBA
-polls are durable.
+Refresh mid-claim and you resume exactly where you were; the room, the
+stages, and the CIBA polls are all durable.
 
 ---
 
@@ -107,6 +119,14 @@ the claim to `awaiting_approval` and calls `startCibaForSubmittedClaim`
 (admin session only). A non-admin filer gets `not_host`; `GET /api/board`
 on the open `/host` console starts the same grant.
 
+**The Claims Supervisor.** [lib/agent/supervisor.ts](lib/agent/supervisor.ts)
+is a second, separate `generateText` loop for the showcase path: one
+supervisor call that makes five tool calls, one per named specialist stage,
+in a fixed order. `POST /api/showcase` runs it inline and returns once all
+five stages, or their deterministic templated fallbacks after a 45s
+timeout, have landed. Policy code, never the model, decides auto-approval
+vs. exception against the $100,000 threshold.
+
 **State and realtime.** There is no websocket. `/file-claim` and `/host`
 refresh UI every 2s. Auth0 `/oauth/token` is only hit when a pending
 `auth_req_id` is due.
@@ -115,21 +135,23 @@ refresh UI every 2s. Auth0 `/oauth/token` is only hit when a pending
 
 | Route | Auth | Purpose |
 | ----- | ---- | ------- |
-| `/` | public | Marketing landing page |
-| `/join` | login | QR landing — join the room, see board seat |
-| `/host` | admin (`@okta.com` or `admin@focusotter.com`) | QR, demo host, board rules, pick, projector CIBA board |
+| `/` | public | Marketing landing page, with the room's field-evidence carousel |
+| `/join` | login | QR landing: submit an amount + reason, watch the room, see approver seat |
+| `/host` | admin (`@okta.com`, `admin@focusotter.com`, or `DEMO_ADMIN_EMAILS`) | QR, demo host, approver seat, pick showcase request, live stage |
 | `/settings` | admin | Connect Google Calendar (Token Vault) |
 | `/file-claim` | protected | Chat with the claims agent; live board sidebar |
 | `/profile` | protected | Auth0 profile and the `policyId` custom claim |
 | `POST /api/claims` | protected | Starts or resumes the caller's claim |
-| `POST /api/claims/reset` | admin | Wipe projector claim + chat / CIBA + seated board |
+| `POST /api/claims/reset` | admin | Wipe projector claim + chat / CIBA + seated board + showcase claim |
 | `GET /api/claims/[id]` | protected | Claim snapshot; admin ticks due CIBA ids |
 | `POST /api/claims/[id]/chat` | protected | One agent turn (AI Gateway) |
-| `GET \| POST /api/join` | login | Upsert joiner; seat / CIBA status for this phone |
-| `GET /api/board` | admin | Joiners + live board + CIBA snapshot; auto-starts CIBA |
+| `GET \| POST /api/join` | login | Upsert joiner; `POST` body `{ amount, reason }` saves a showcase request |
+| `POST /api/join/clear` | admin | Null out every audience request (joiners stay in the room) |
+| `GET /api/board` | admin | Joiners + room stats + live board + claim/CIBA snapshot; auto-starts CIBA |
 | `POST /api/board/pick` | admin | Randomly seat the saved board size (pins first) |
 | `POST /api/board/settings` | admin | Save board size and CIBA yes threshold |
 | `POST /api/board/host` | admin | Save demo host email + Auth0 sub |
+| `POST /api/showcase` | admin | Pick the room's largest request (or a given `sub`), create the claim, run the Claims Supervisor inline |
 | `GET \| POST /api/ciba` | admin | Board status; fallback start if auto-start failed |
 | `POST /api/ciba/poll` | admin | Tick due `/oauth/token` per `auth_req_id` |
 | `GET /api/connection-status` | admin | Token Vault Google connected? |
@@ -145,6 +167,9 @@ The app will not start a useful claims chat without these in `.env.local`:
 | Auth0 (`AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, `AUTH0_CLIENT_SECRET`, `AUTH0_SECRET`) | Universal Login + session cookie |
 | `DATABASE_URL` | Neon |
 | **`AI_GATEWAY_API_KEY`** | Vercel AI Gateway. Required for `/file-claim`. There is no Anthropic key — do not set `ANTHROPIC_API_KEY`. |
+
+Optional: `DEMO_ADMIN_EMAILS` (comma-separated) adds extra operator logins
+for `/host` and `/settings` beyond `@okta.com` and `admin@focusotter.com`.
 
 Mint the gateway key at
 [Vercel AI Gateway API keys](https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys).
@@ -170,16 +195,22 @@ threshold). Those persist in Neon `demo_settings`. Raise to **6 / 3** on
 
 ## Running the demo on stage
 
-1. Presenter signs in with an admin email (`@okta.com` or
-   `admin@focusotter.com`), opens `/host`, saves **Demo host** (their
-   email + `sub`), then `/settings` → Connect Google Calendar.
-2. Projector on `/host`. Audience scans the QR → Auth0 login → `/join`.
-3. **Pick board.** Seated phones show "you're on the board."
-4. Filer files the Hulk-smashed-car claim on `/file-claim`. Confirm
-   submission. With `/host` open, the host poll starts CIBA.
-5. CIBA emails go out to the seated board (`requested_expiry=600`). The
-   projector ticks pending → approved / denied.
-6. Yeses at the saved threshold approve the claim, confetti fires, and a
-   calendar event lands on the host Google account.
+1. Presenter signs in with an admin email, opens `/host`, expands
+   **Pre-show settings**, saves **Demo host** (their email + `sub`), seats
+   the human approver, and connects Google Calendar from `/settings`.
+2. Projector stays on `/host` (intake stage: QR + room counters). Audience
+   scans the QR → Auth0 login → `/join` → submits an amount and a reason →
+   "You're in."
+3. Operator taps **Pick showcase request**. `/host` picks the room's
+   largest amount (or a specific row's "Pick this") and creates the
+   showcase claim.
+4. The Claims Supervisor runs its five stages live on the projector.
+5. At or below $100,000 the claim auto-approves. Above it, `/host` shows
+   the exception panel and auto-starts CIBA: one approval email to the
+   seated human approver.
+6. Approval (the human's tap, or the automatic threshold decision) shows
+   the outcome panel and schedules `Repair inspection — claim HS-XXXX` on
+   the host's Google Calendar via Token Vault.
 
-Between runs, tap **Start over** on `/file-claim` or `/host` (admin only).
+Between runs: **Clear room requests** (pre-show settings) resets the
+queue; **Start over** wipes the showcase claim and seated approver.

@@ -1,61 +1,84 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { CheckCircle2, Mail, Radar, ShieldCheck, TriangleAlert } from 'lucide-react'
-import { Badge } from '@/components/ui/badge'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { DEFAULT_BOARD_SIZE } from '@/lib/types'
+import { Check, Mail, Radar, ShieldCheck, TriangleAlert } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { formatCompactMoney, formatMoney } from '@/components/stage/format'
+import type { ClaimDecision, ClaimStatus } from '@/lib/types'
 
+/** Typed locally against the /api/join contract (lib/types.ts is locked). */
 type JoinState = {
   host: boolean
-  emailVerified: boolean
   onBoard: boolean
-  joiner: { name: string; email: string } | null
-  boardSize?: number
-  claimStatus: string | null
   ciba: { status: string; bindingMessage: string; error: string | null } | null
+  request: { amount: number; reason: string } | null
+  room: { joined: number; requests: number; totalRequested: number }
+  showcase: null | {
+    mine: boolean
+    code: string
+    amount: number
+    status: ClaimStatus
+    decision: ClaimDecision
+    customerName: string
+  }
 }
 
 const POLL_MS = 2000
+const AMOUNT_MIN = 1
+const AMOUNT_MAX = 1_000_000_000
+
+const SHOWCASE_STATUS_TEXT: Record<ClaimStatus, string> = {
+  pending: 'Processing…',
+  awaiting_approval: 'Waiting for a human approver',
+  approved: 'Approved',
+  denied: 'Declined',
+}
+
+/** Panel accent per claim status — gold while it's live on stage, green/red once decided. */
+const SHOWCASE_PANEL: Record<ClaimStatus, { border: string; bg: string; text: string }> = {
+  pending: { border: 'border-hud/60', bg: 'bg-hud/10', text: 'text-hud' },
+  awaiting_approval: { border: 'border-gold', bg: 'bg-gold/10', text: 'text-gold' },
+  approved: { border: 'border-stone-time/60', bg: 'bg-stone-time/10', text: 'text-stone-time' },
+  denied: { border: 'border-destructive/60', bg: 'bg-destructive/10', text: 'text-destructive' },
+}
 
 export function JoinLogin({ authError }: { authError: string | null }) {
   return (
-    <JoinShell>
-      {authError && (
-        <p className="mb-4 rounded-sm border border-destructive/40 bg-destructive/10 px-3 py-2 text-center text-sm text-destructive">
-          {authError}
-        </p>
-      )}
-      <Card className="hud-panel rounded-none border-transparent">
-        <CardHeader className="items-center py-14 text-center">
-          <Radar className="mb-4 h-10 w-10 text-hud" />
-          <CardTitle className="uppercase">Join the room</CardTitle>
-          <CardDescription className="max-w-sm">
-            Log in with Auth0. A verified email is required to sit on the CIBA board.
-          </CardDescription>
-          <a
-            href="/auth/login?returnTo=/join"
-            className="mt-6 inline-flex items-center justify-center rounded-md bg-gradient-to-b from-primary to-[oklch(0.5_0.2_25)] px-5 py-2.5 font-display text-xs font-semibold uppercase tracking-[0.12em] text-primary-foreground"
-          >
-            Log in
-          </a>
-        </CardHeader>
+    <JoinShell banner={authError}>
+      <Card>
+        <div className="flex flex-col items-center gap-4 py-14 text-center">
+          <Radar className="h-10 w-10 text-hud" />
+          <div className="w-full">
+            <h1 className="font-display text-2xl font-bold uppercase text-foreground">
+              Join the room
+            </h1>
+            <p className="mx-auto mt-2 max-w-sm text-base text-muted-foreground">
+              Sign in with Auth0 to file a claim from your seat.
+            </p>
+          </div>
+          <Button asChild className="h-12 min-w-40 rounded-lg text-sm normal-case tracking-normal">
+            <a href="/auth/login?returnTo=/join">Sign in</a>
+          </Button>
+        </div>
       </Card>
     </JoinShell>
   )
 }
 
 export function JoinClient({
-  userName,
   userEmail,
   authError,
 }: {
-  userName: string
   userEmail: string
   authError?: string | null
 }) {
   const [state, setState] = useState<JoinState | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [pollError, setPollError] = useState<string | null>(null)
+
+  const [amount, setAmount] = useState('')
+  const [reason, setReason] = useState('')
+  const [formError, setFormError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -64,7 +87,7 @@ export function JoinClient({
     const apply = (next: JoinState) => {
       if (!active) return
       setState(next)
-      setError(null)
+      setPollError(null)
     }
 
     const read = async () => {
@@ -81,14 +104,12 @@ export function JoinClient({
             const body = await posted.json().catch(() => ({}))
             throw new Error(body.error || `Join failed (${posted.status})`)
           }
-          if (posted.ok) {
-            apply((await posted.json()) as JoinState)
-          }
+          if (posted.ok) apply((await posted.json()) as JoinState)
           joined = true
         }
         await read()
       } catch (err) {
-        if (active) setError(err instanceof Error ? err.message : 'Join failed')
+        if (active) setPollError(err instanceof Error ? err.message : 'Join failed')
       }
     }
 
@@ -100,81 +121,126 @@ export function JoinClient({
     }
   }, [])
 
-  if (state?.host) {
+  const submitClaim = async () => {
+    setFormError(null)
+    const amountNum = Number(amount)
+    if (!Number.isInteger(amountNum) || amountNum < AMOUNT_MIN || amountNum > AMOUNT_MAX) {
+      setFormError('Enter a whole dollar amount between $1 and $1,000,000,000.')
+      return
+    }
+    const trimmedReason = reason.trim()
+    if (trimmedReason.length < 3 || trimmedReason.length > 200) {
+      setFormError('Tell us what happened in 3 to 200 characters.')
+      return
+    }
+
+    setSubmitting(true)
+    try {
+      const res = await fetch('/api/join', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount: amountNum, reason: trimmedReason }),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setFormError(body.error || `Submit failed (${res.status})`)
+        return
+      }
+      setState(body as JoinState)
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Submit failed')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  if (!state) {
     return (
-      <JoinShell>
-        <Card className="hud-panel rounded-none border-transparent">
-          <CardHeader className="items-center py-14 text-center">
-            <ShieldCheck className="mb-4 h-10 w-10 text-gold" />
-            <CardTitle className="uppercase">You are the operator</CardTitle>
-            <CardDescription className="max-w-sm">
-              This QR is for the room. Open the host console to pick the board.
-            </CardDescription>
-            <a href="/host" className="mt-6 text-sm text-hud underline">
-              Go to host console
+      <JoinShell banner={authError}>
+        <Card>
+          <div className="flex flex-col items-center gap-4 py-14 text-center">
+            <span className="relative grid h-16 w-16 place-items-center">
+              <span className="absolute inset-0 rounded-full border border-dashed border-hud/40 [animation:spin_8s_linear_infinite]" />
+              <Radar className="h-7 w-7 text-hud/70" />
+            </span>
+            <div className="w-full">
+              <h1 className="font-display text-xl font-bold uppercase text-foreground">
+                Connecting…
+              </h1>
+              <p className="mx-auto mt-2 max-w-sm text-base text-muted-foreground">
+                {pollError ?? 'Getting the room ready.'}
+              </p>
+            </div>
+          </div>
+        </Card>
+      </JoinShell>
+    )
+  }
+
+  if (state.host) {
+    return (
+      <JoinShell banner={authError}>
+        <Card>
+          <div className="flex flex-col items-center gap-4 py-14 text-center">
+            <ShieldCheck className="h-10 w-10 text-gold" />
+            <div className="w-full">
+              <h1 className="font-display text-2xl font-bold uppercase text-foreground">
+                You are the operator
+              </h1>
+              <p className="mx-auto mt-2 max-w-sm text-base text-muted-foreground">
+                This QR is for the room. Open the control room to run the show.
+              </p>
+            </div>
+            <a href="/host" className="text-sm font-semibold text-hud underline underline-offset-4">
+              Open the control room
             </a>
-          </CardHeader>
+          </div>
         </Card>
       </JoinShell>
     )
   }
 
-  if (!state?.emailVerified && state) {
-    return (
-      <JoinShell>
-        <Card data-stone="reality" className="hud-panel rounded-none border-transparent">
-          <span className="absolute inset-x-0 top-0 h-0.5 bg-[var(--stone)]" />
-          <CardHeader className="items-center py-14 text-center">
-            <TriangleAlert className="mb-4 h-10 w-10 text-stone-reality" />
-            <CardTitle className="uppercase">Email not verified</CardTitle>
-            <CardDescription className="max-w-sm">
-              Auth0 CIBA email only reaches a verified inbox. Verify {userEmail} before you can
-              sit on the claims board.
-            </CardDescription>
-          </CardHeader>
-        </Card>
-      </JoinShell>
-    )
-  }
-
-  const boardSize = state?.boardSize ?? DEFAULT_BOARD_SIZE
-
-  if (state?.onBoard) {
+  if (state.onBoard) {
     const ciba = state.ciba
     return (
-      <JoinShell>
-        <Card data-stone="time" className="hud-panel glow-stone rounded-none border-transparent">
-          <span className="absolute inset-x-0 top-0 h-0.5 bg-[var(--stone)]" />
-          <CardHeader className="items-center py-12 text-center">
-            <span className="mb-5 grid h-16 w-16 place-items-center rounded-full bg-stone-time/15 ring-1 ring-stone-time/50">
-              <CheckCircle2 className="h-8 w-8 text-stone-time" />
+      <JoinShell banner={authError ?? pollError}>
+        <Card accent="border-stone-time/50">
+          <div className="flex flex-col items-center gap-4 py-12 text-center">
+            <span className="grid h-16 w-16 place-items-center rounded-full bg-stone-time/15">
+              <Check className="h-8 w-8 text-stone-time" />
             </span>
-            <span className="hud-label text-stone-time">Seated</span>
-            <CardTitle className="mt-2 text-3xl uppercase">You&apos;re on the board</CardTitle>
-            <CardDescription className="max-w-sm text-base">
-              {userName}, you are one of the {boardSize}. Watch the projector — your name is up
-              there.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3 pb-10 text-center">
+            <div className="w-full">
+              <span className="font-mono text-[13px] uppercase tracking-[0.1em] text-stone-time">
+                Human approver
+              </span>
+              <h1 className="mt-2 font-display text-2xl font-bold uppercase text-foreground">
+                You&apos;re the human approver
+              </h1>
+              <p className="mx-auto mt-2 max-w-sm text-base text-muted-foreground">
+                When the room&apos;s request needs authorization, Auth0 will email you. Open it
+                and tap Approve.
+              </p>
+            </div>
+          </div>
+          <div className="space-y-3 pb-2 text-center">
             {ciba?.status === 'pending' && (
               <p className="flex items-center justify-center gap-2 text-sm text-gold">
                 <Mail className="h-4 w-4" />
-                Check {userEmail} — Accept the CIBA mail.
+                Check {userEmail} — the approval email is on its way.
               </p>
             )}
             {ciba?.status === 'approved' && (
-              <Badge variant="success">You approved this claim</Badge>
+              <p className="text-sm font-semibold text-stone-time">You approved this claim</p>
             )}
             {ciba?.status === 'denied' && (
-              <Badge variant="destructive">You declined this claim</Badge>
+              <p className="text-sm font-semibold text-destructive">You declined this claim</p>
             )}
             {ciba?.status === 'error' && (
               <p className="flex items-center justify-center gap-2 text-sm text-destructive">
                 <TriangleAlert className="h-4 w-4" />
                 {ciba.error
-                  ? `CIBA mail failed: ${ciba.error}`
-                  : 'CIBA mail failed. Tell the operator — your inbox was not reached.'}
+                  ? `Approval email failed: ${ciba.error}`
+                  : 'Approval email failed. Tell the operator — your inbox was not reached.'}
               </p>
             )}
             {ciba?.bindingMessage && (
@@ -182,49 +248,146 @@ export function JoinClient({
                 Binding message · {ciba.bindingMessage}
               </p>
             )}
-          </CardContent>
+          </div>
         </Card>
       </JoinShell>
     )
   }
 
+  if (state.request) {
+    const panel = state.showcase?.mine ? SHOWCASE_PANEL[state.showcase.status] : null
+    return (
+      <JoinShell banner={authError ?? pollError}>
+        <div className="flex flex-col items-center gap-4 pt-6 text-center">
+          <span className="grid h-16 w-16 place-items-center rounded-full bg-stone-time/15">
+            <Check className="h-8 w-8 text-stone-time" />
+          </span>
+          <div className="w-full">
+            <h1 className="font-display text-[36px] font-bold uppercase leading-[1.15] text-foreground">
+              You&apos;re in.
+            </h1>
+            <p className="mt-1 text-lg text-muted-foreground">Watch the room.</p>
+          </div>
+        </div>
+
+        <div className="mt-7 flex flex-col gap-3.5">
+          <div className="flex flex-col gap-1.5 rounded-[10px] border border-border bg-card px-5 py-4.5">
+            <p className="hud-readout font-mono text-[22px] font-semibold text-gold">
+              {formatMoney(state.request.amount)}
+            </p>
+            <p className="text-base text-foreground">&ldquo;{state.request.reason}&rdquo;</p>
+          </div>
+          <p className="text-center text-sm text-muted-foreground">
+            {state.room.joined} {state.room.joined === 1 ? 'person' : 'people'} in the room ·{' '}
+            {state.room.requests} {state.room.requests === 1 ? 'request' : 'requests'} ·{' '}
+            {formatCompactMoney(state.room.totalRequested)} requested
+          </p>
+        </div>
+
+        {state.showcase?.mine && panel && (
+          <div className={`mt-6 flex flex-col gap-2 rounded-[10px] border p-5 ${panel.border} ${panel.bg}`}>
+            <p className={`text-base font-bold ${panel.text}`}>Your request is on stage</p>
+            <p className="text-[15px] text-foreground">
+              {SHOWCASE_STATUS_TEXT[state.showcase.status]}
+            </p>
+          </div>
+        )}
+      </JoinShell>
+    )
+  }
+
   return (
-    <JoinShell>
-      {authError && (
-        <p className="mb-4 rounded-sm border border-destructive/40 bg-destructive/10 px-3 py-2 text-center text-sm text-destructive">
-          {authError}
+    <JoinShell banner={authError ?? pollError}>
+      <div className="mb-7">
+        <span className="font-mono text-[13px] uppercase tracking-[0.1em] text-hud">
+          Your claim
+        </span>
+        <h1 className="mt-2 font-display text-[32px] font-bold uppercase leading-[1.12] text-foreground">
+          How much should Hero Shield reimburse you?
+        </h1>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <div className="flex h-14 items-center gap-2 rounded-[10px] border border-border bg-card px-4.5 focus-within:border-hud">
+          <span className="font-display text-[30px] font-bold text-muted-foreground">$</span>
+          <input
+            id="claim-amount"
+            aria-label="Claim amount in dollars"
+            type="number"
+            inputMode="numeric"
+            min={AMOUNT_MIN}
+            max={AMOUNT_MAX}
+            step={1}
+            placeholder="1,000,000"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            className="h-full w-full bg-transparent font-display text-[30px] font-bold text-foreground outline-none placeholder:text-muted-foreground/50"
+          />
+        </div>
+      </div>
+
+      <div className="mt-6 flex flex-col gap-2">
+        <label htmlFor="claim-reason" className="text-[15px] font-semibold text-foreground">
+          What happened?
+        </label>
+        <textarea
+          id="claim-reason"
+          rows={3}
+          maxLength={200}
+          placeholder="Hulk threw my car."
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          className="w-full rounded-[10px] border border-border bg-card px-4 py-3.5 text-lg text-foreground outline-none placeholder:text-muted-foreground/50 focus:border-hud"
+        />
+        <div className="text-right text-xs text-muted-foreground">{reason.length}/200</div>
+      </div>
+
+      {formError && (
+        <p className="mt-4 rounded-sm border border-destructive/40 bg-destructive/10 px-3 py-2 text-center text-sm text-destructive">
+          {formError}
         </p>
       )}
-      <Card className="hud-panel rounded-none border-transparent">
-        <CardHeader className="items-center py-14 text-center">
-          <span className="relative mb-5 grid h-16 w-16 place-items-center">
-            <span className="absolute inset-0 rounded-full border border-dashed border-hud/40 [animation:spin_8s_linear_infinite]" />
-            <Radar className="h-7 w-7 text-hud/70" />
-          </span>
-          <CardTitle className="uppercase">In the room</CardTitle>
-          <CardDescription className="max-w-sm">
-            {error ??
-              `Logged in. Waiting for the operator to pick the board of ${boardSize}. Keep this page open.`}
-          </CardDescription>
-          <Badge variant="hud" className="mt-4">
-            {state?.joiner ? 'Joined' : 'Connecting…'}
-          </Badge>
-        </CardHeader>
-      </Card>
+
+      <Button
+        type="button"
+        variant="gold"
+        className="mt-7 h-14 w-full rounded-[10px] text-[17px] font-bold normal-case tracking-normal"
+        disabled={submitting}
+        onClick={submitClaim}
+      >
+        {submitting ? 'Submitting…' : 'Submit my claim'}
+      </Button>
     </JoinShell>
   )
 }
 
-function JoinShell({ children }: { children: React.ReactNode }) {
+function Card({
+  children,
+  accent = 'border-transparent',
+}: {
+  children: React.ReactNode
+  accent?: string
+}) {
   return (
-    <div className="hud-grid relative min-h-screen overflow-hidden p-4 md:p-8">
-      <div className="relative mx-auto max-w-lg">
-        <div className="animate-rise mb-8 text-center">
-          <span className="hud-label">Audience join · Sector 616</span>
-          <h1 className="mt-2 font-display text-3xl font-bold uppercase tracking-tight">
-            Claims board
-          </h1>
-        </div>
+    <div className={`rounded-[10px] border ${accent} bg-card px-5 sm:px-6`}>{children}</div>
+  )
+}
+
+function JoinShell({
+  children,
+  banner,
+}: {
+  children: React.ReactNode
+  banner?: string | null
+}) {
+  return (
+    <div className="relative min-h-screen px-6 py-8">
+      <div className="relative mx-auto max-w-md">
+        {banner && (
+          <p className="mb-4 rounded-sm border border-destructive/40 bg-destructive/10 px-3 py-2 text-center text-sm text-destructive">
+            {banner}
+          </p>
+        )}
         {children}
       </div>
     </div>

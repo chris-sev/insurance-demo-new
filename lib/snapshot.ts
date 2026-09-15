@@ -3,7 +3,7 @@ import { boardRulesForClaim, getDemoHost } from '@/lib/board-config'
 import { listCibaForClaim, toCibaMember } from '@/lib/ciba-store'
 import { listMessages } from '@/lib/claims'
 import { isGoogleConnected } from '@/lib/google'
-import type { CibaBoardSnapshot, Claim, ClaimSnapshot } from '@/lib/types'
+import { claimCode, type CibaBoardSnapshot, type Claim, type ClaimSnapshot } from '@/lib/types'
 
 export async function getCibaBoardSnapshot(claim: Claim): Promise<CibaBoardSnapshot> {
   const [{ boardSize, yesThreshold }, host] = await Promise.all([
@@ -38,6 +38,24 @@ export async function getCibaBoardSnapshot(claim: Claim): Promise<CibaBoardSnaps
     blockReason: claim.cibaBlockReason,
     calendarEventId: claim.calendarEventId,
     started: false,
+  }
+}
+
+/** Shared claim shape for GET /api/board and POST /api/showcase. */
+export async function claimForBoard(claim: Claim) {
+  return {
+    id: claim.id,
+    code: claimCode(claim.id),
+    status: claim.status,
+    policyId: claim.policyId,
+    incidentDescription: claim.incidentDescription,
+    calendarEventId: claim.calendarEventId,
+    createdAt: claim.createdAt,
+    requestedAmount: claim.requestedAmount,
+    customerName: claim.customerName,
+    stages: claim.stages,
+    decision: claim.decision,
+    board: await getCibaBoardSnapshot(claim),
   }
 }
 

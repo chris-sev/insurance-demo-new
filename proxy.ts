@@ -44,5 +44,10 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt).*)'],
+  // Static assets under public/ are excluded by extension: the landing page,
+  // the comic carousel, and the coverage art must load for logged-out visitors,
+  // and listing folders one by one breaks every time a new one is added.
+  matcher: [
+    '/((?!_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt|.*\\.(?:jpg|jpeg|png|gif|svg|webp|avif|ico)$).*)',
+  ],
 }

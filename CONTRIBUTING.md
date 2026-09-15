@@ -16,21 +16,35 @@ checklist: [SETUP.md](SETUP.md). What the product does: [README.md](README.md).
 
 ## What this app is
 
-A conference-stage insurance demo. Superhero car insurance.
+A conference-stage insurance demo. Superhero car insurance, and a live
+demo of Auth0 for AI agents: one authenticated customer request becomes a
+governed chain of work, with every action tied to a responsible identity
+and high-value actions crossing a human authority boundary.
 
-1. The presenter opens `/host` on the projector (admin window) and `/file-claim`
-   in a second window (the person filing).
-2. The audience scans a QR → Auth0 Universal Login → `/join`. Verified emails
-   can sit on the CIBA board.
-3. The presenter picks a board of N verified joiners (default 1; raise to 6
-   for the talk). The configured demo host is never seated.
-4. The filer chats with the claims agent (Hulk smashed a white 2006 Honda
-   Pilot). Confirm submission flips the claim to `awaiting_approval`.
-5. With `/host` open, CIBA emails go to the seated board
-   (`requested_expiry=600` so Auth0 uses **email**, not Guardian). Board
-   members approve on their phones.
-6. Yeses at the saved threshold approve the claim, fire confetti, and write
-   one event on the presenter's Google Calendar via Auth0 Token Vault.
+1. The audience scans one QR → Auth0 Universal Login → `/join`, where each
+   customer submits an amount and a short reason for their claim.
+   Unverified emails can submit; only the human approver seat needs a
+   verified email.
+2. The operator (admin login) opens `/host` and taps **Pick showcase
+   request**, a deterministic pick of the room's largest amount (tie
+   broken by earliest submission), or a specific request by hand.
+3. The **Claims Supervisor** ([lib/agent/supervisor.ts](lib/agent/supervisor.ts))
+   runs, in one Vercel AI SDK loop, five named specialist stages as tool
+   calls (Policy, Coverage, Risk, Repair, Customer Update), each landing
+   live on the projector.
+4. Policy code, not the model, decides: at or below $100,000 the claim
+   auto-approves; above it, the claim becomes an exception.
+5. For an exception, `/host` auto-starts CIBA: one asynchronous approval
+   email to the seated human approver (board size 1 by default,
+   `requested_expiry=600` so Auth0 uses **email**, not Guardian).
+6. Approval, whether by the human approver or automatically under the
+   threshold, writes one Token Vault calendar event on the host's Google
+   Calendar: `Repair inspection — claim HS-XXXX`.
+
+The original chat path still works: `/file-claim` lets a filer talk to the
+claims agent (Hulk smashed a white 2006 Honda Pilot) and confirm
+submission the same way it always has; it shows on `/host` whenever no
+showcase claim exists.
 
 Every step is a row in Neon. Refresh mid-claim and you resume.
 
@@ -68,17 +82,31 @@ Coding agents (Cursor, Claude Code, etc.) should:
    `@auth0/ai`.
 5. Never print a filled-in `.env.local`.
 
-The claims agent itself lives in [lib/agent/](lib/agent/). It is a
+The chat claims agent lives in [lib/agent/](lib/agent/). It is a
 `generateText` tool loop (Vercel AI SDK) with three tools:
 `save_claim_details`, `notify_fraud`, `publish_claim_submission`. Tools
 write Neon; `prepareStep` re-reads the claim so the next turn matches the
-database.
+database. This backs `/file-claim` only.
+
+The showcase path has its own, separate loop:
+[lib/agent/supervisor.ts](lib/agent/supervisor.ts) is the **Claims
+Supervisor**, one `generateText` call that makes five tool calls in a
+fixed order, one per named specialist stage (`STAGES` in
+[lib/types.ts](lib/types.ts)). Each tool call appends one `ClaimStage` row
+so the `/host` poll shows live progress. This is honestly **one AI SDK
+loop**, never described as five independently running agents. Wrapped in
+a 45s `AbortSignal.timeout`; on any error, timeout, or missing stage,
+`fillMissingStages` fills the gap with a templated summary built from the
+request so the showcase never stalls in front of a room. The decision
+(auto-approve vs. exception against `HUMAN_AUTHORITY_THRESHOLD`, $100,000)
+is applied by policy code afterward, never by the model.
 
 On stage there is a second kind of “agent”: the presenter. They are an
-**admin** if their login email is `@okta.com` or `admin@focusotter.com`.
-On `/host` they save `demo_host_email` and `demo_host_sub` (sub defaults
-to their Auth0 `sub`). That identity is excluded from the board and is
-whose Token Vault calendar gets the event. Other `@okta.com` people in
+**admin** if their login email is `@okta.com`, `admin@focusotter.com`, or
+listed in the optional `DEMO_ADMIN_EMAILS` env var (comma-separated). On
+`/host` they save `demo_host_email` and `demo_host_sub` (sub defaults
+to their Auth0 `sub`). That identity is excluded from the approver seat
+and is whose Token Vault calendar gets the event. Other admin logins in
 the audience can still sit — only the configured demo host is skipped.
 
 ---
@@ -155,8 +183,10 @@ Auth0 picks the channel from `requested_expiry`:
 This app always sends `requested_expiry=600`. If you leave email off, or
 send 300, CIBA fails or goes to Guardian. `login_hint` is `iss_sub` (the
 board member's Auth0 `sub`), never a raw email. `binding_message` is at
-most 64 characters, charset `A-Za-z0-9+-_.,:#`, no spaces
-(`Hulk-smash-claim-<id>`).
+most 64 characters, charset `A-Za-z0-9+-_.,:#`, no spaces. For a
+showcase claim it carries the amount (`HeroShield-approve-USD1000000-HS-4A7F`),
+falling back to `Hulk-smash-claim-<id>` for a chat-filed claim
+([lib/binding-message.ts](lib/binding-message.ts)).
 
 ### 3. Email provider and Asynchronous Approval template
 
@@ -189,47 +219,63 @@ with nowhere to write the calendar event is a hollow approval.
 
 | Role | Who | What they can do |
 | ---- | --- | ---------------- |
-| **Admin** | Login email is `@okta.com` or `admin@focusotter.com` | Open `/host` and `/settings`, pick the board, start CIBA, reset the claim |
-| **Demo host** | `demo_host_email` / `demo_host_sub` saved on `/host` | Excluded from the board; Token Vault calendar writes only from a session that matches this identity |
+| **Admin** | Login email is `@okta.com`, `admin@focusotter.com`, or listed in `DEMO_ADMIN_EMAILS` | Open `/host` and `/settings`, seat the approver, pick the showcase request, start CIBA, reset |
+| **Demo host** | `demo_host_email` / `demo_host_sub` saved on `/host` | Excluded from the approver seat; Token Vault calendar writes only from a session that matches this identity |
 
-On first open of `/host`, the Demo host card prefills **sub** with the
-signed-in admin's Auth0 `sub` and **email** with their email. Save before
-you pick a board. Optional `DEMO_HOST_EMAIL` / `DEMO_HOST_SUB` in
-`.env.local` seed the row until someone saves.
+On first open of `/host`, the Demo host card (inside **Pre-show
+settings**) prefills **sub** with the signed-in admin's Auth0 `sub` and
+**email** with their email. Save before you seat an approver. Optional
+`DEMO_HOST_EMAIL` / `DEMO_HOST_SUB` in `.env.local` seed the row until
+someone saves. `DEMO_ADMIN_EMAILS` is a separate, optional env var that
+grants extra logins admin access; it does not affect the demo host
+identity.
 
 ---
 
 ## Stage run-of-show
 
-1. Presenter signs in with an admin email, opens `/host`, saves themselves
-   as demo host, connects Google on `/settings`.
-2. Projector stays on `/host`. Raise board rules to **6 / 3** for the talk
-   (defaults are 1 / 1 for rehearsal).
-3. Audience scans the QR → Auth0 login → `/join`.
-4. **Pick board.** Seated phones show "you're on the board."
-5. Second window: `/file-claim`, Hulk-smashed Honda Pilot, confirm.
-   `/host` auto-starts CIBA.
-6. Board members Accept in email. Threshold yeses → approved, confetti,
-   calendar event.
+1. Presenter signs in with an admin email, opens `/host`, expands the
+   **Pre-show settings** drawer, saves themselves as demo host, seats the
+   human approver, and connects Google on `/settings`.
+2. Projector stays on `/host` (intake stage: QR + room counters). Audience
+   scans the QR → Auth0 login → `/join` → submits an amount and a reason.
+3. Operator taps **Pick showcase request**. `/host` deterministically picks
+   the room's largest request and creates the showcase claim.
+4. The Claims Supervisor runs its five stages live; the projector shows
+   each one land.
+5. Above $100,000, `/host` shows the exception panel and auto-starts CIBA:
+   one approval email to the seated human approver. At or below, the claim
+   auto-approves immediately.
+6. Approval (the approver's email tap, or the automatic policy decision)
+   shows the outcome panel and schedules the repair inspection on the host
+   Google Calendar via Token Vault.
 
 **Start over** (admin only) on `/file-claim` or `/host` wipes the projector
-claim and the seated board. Joiners, board rules, demo host, and Google
-stay.
+claim, the showcase claim, and the seated approver. **Clear room requests**
+(pre-show settings) wipes only the audience's submitted amounts/reasons.
+Joiners, board rules, demo host, and Google stay.
 
 ---
 
 ## Layout
 
 ```
-app/            pages + route handlers
-components/     client components (chat, join, host, board) + shadcn/ui
-lib/agent/      Vercel AI SDK tool loop (gateway + Anthropic default)
-lib/ciba.ts     /bc-authorize + CIBA token poll (not @auth0/ai)
-lib/board.ts    joiners + pick
-lib/board-config.ts  board rules + demo host identity
-lib/host.ts     admin email gate
-lib/claims.ts   claim SQL
-lib/auth0.ts    Auth0 client, Token Vault connect-account
-db/schema.sql   claims / messages / joiners / board / ciba / demo_settings
-proxy.ts        Auth0 route mounting + page protection
+app/                  pages + route handlers
+app/api/showcase/     POST: pick + run the Claims Supervisor
+app/api/join/clear/   POST: wipe room requests
+components/           client components (chat, join, host, board) + shadcn/ui
+components/stage/     /host stage panels (intake, processing, exception, outcome)
+lib/agent/run.ts      chat claims agent tool loop (/file-claim)
+lib/agent/supervisor.ts  Claims Supervisor: one loop, five specialist-stage tool calls
+lib/ciba.ts           /bc-authorize + CIBA token poll (not @auth0/ai)
+lib/ciba-flow.ts      CIBA auto-start, poll, Token Vault calendar write
+lib/binding-message.ts  CIBA binding_message, amount-aware for showcase claims
+lib/board.ts          joiners, room stats, showcase pick, approver seat
+lib/board-config.ts   board rules + demo host identity
+lib/host.ts           admin email gate (DEMO_ADMIN_EMAILS)
+lib/claims.ts         claim SQL, including the showcase claim lifecycle
+lib/auth0.ts          Auth0 client, Token Vault connect-account
+lib/types.ts          shared types: STAGES, HUMAN_AUTHORITY_THRESHOLD, Claim, RoomStats
+db/schema.sql         claims / messages / joiners / board / ciba / demo_settings
+proxy.ts              Auth0 route mounting + page protection
 ```

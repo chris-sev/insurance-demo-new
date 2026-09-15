@@ -20,6 +20,41 @@ export type CibaAutoStart =
       required?: number
     }
 
+/**
+ * Showcase-claim specialist stages. The runtime is ONE Vercel AI SDK
+ * supervisor loop (lib/agent/supervisor.ts); each stage is one governed
+ * tool call the supervisor makes on behalf of the customer. Never present
+ * these as independently running agents.
+ */
+export type StageKey = 'policy' | 'coverage' | 'risk' | 'repair' | 'customer_update'
+
+export const STAGES: ReadonlyArray<{ key: StageKey; label: string; tool: string }> = [
+  { key: 'policy', label: 'Policy Specialist', tool: 'Policy records' },
+  { key: 'coverage', label: 'Coverage Specialist', tool: 'Coverage rules' },
+  { key: 'risk', label: 'Risk Specialist', tool: 'Fraud & anomaly checks' },
+  { key: 'repair', label: 'Repair Specialist', tool: 'Company calendar · Token Vault' },
+  { key: 'customer_update', label: 'Customer Update Specialist', tool: 'Customer message' },
+]
+
+export interface ClaimStage {
+  key: StageKey
+  status: 'done' | 'flagged'
+  /** One or two plain sentences the projector shows verbatim. */
+  summary: string
+  at: string
+}
+
+/** How the supervisor resolved the amount. Null while stages are running. */
+export type ClaimDecision = 'auto_approved' | 'exception' | null
+
+/** Requests above this cross the human authority boundary (CIBA). */
+export const HUMAN_AUTHORITY_THRESHOLD = 100_000
+
+/** Stage-friendly id: HS-4A7F. */
+export function claimCode(id: string): string {
+  return `HS-${id.replace(/-/g, '').slice(0, 4).toUpperCase()}`
+}
+
 export interface Claim {
   id: string
   userId: string
@@ -35,6 +70,30 @@ export interface Claim {
   /** Frozen at CIBA start. Null until emails go out. */
   cibaBoardSize: number | null
   cibaYesThreshold: number | null
+  /** Showcase request fields. Null for a chat-filed claim on /file-claim. */
+  requestedAmount: number | null
+  customerName: string | null
+  stages: ClaimStage[]
+  decision: ClaimDecision
+}
+
+/** One audience request, as shown in the room queue on /host. */
+export interface RoomRequest {
+  sub: string
+  name: string
+  amount: number
+  reason: string
+  requestedAt: string
+  /** True when this request is the claim the projector is processing. */
+  selected: boolean
+}
+
+export interface RoomStats {
+  joined: number
+  requests: number
+  totalRequested: number
+  /** Largest first, then earliest. Capped at 8. */
+  queue: RoomRequest[]
 }
 
 export interface ChatMessage {

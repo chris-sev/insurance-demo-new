@@ -1,8 +1,12 @@
 import { NextResponse } from 'next/server'
 import { requireHostSession } from '@/lib/api-auth'
-import { eligibleJoiners, getCurrentBoard, listJoiners, withoutHost } from '@/lib/board'
-import { autoStartCibaFromHostPoll, pollCibaForClaim } from '@/lib/ciba-flow'
-import { getClaim, getLatestSubmittedClaim } from '@/lib/claims'
+import { eligibleJoiners, getCurrentBoard, listJoiners, roomStats, withoutHost } from '@/lib/board'
+import {
+  autoStartCibaFromHostPoll,
+  pollCibaForClaim,
+  writeHostCalendarEvent,
+} from '@/lib/ciba-flow'
+import { getClaim, getLatestSubmittedClaim, getShowcaseClaim } from '@/lib/claims'
 import { isGoogleConnected } from '@/lib/google'
 import {
   getBoardSettings,
@@ -11,7 +15,8 @@ import {
   isCibaCatchUpWindow,
 } from '@/lib/board-config'
 import { hasLiveCiba } from '@/lib/ciba-store'
-import { getCibaBoardSnapshot } from '@/lib/snapshot'
+import { canWriteHostCalendar } from '@/lib/host'
+import { claimForBoard } from '@/lib/snapshot'
 
 export const dynamic = 'force-dynamic'
 
@@ -19,7 +24,12 @@ export async function GET() {
   const auth = await requireHostSession()
   if ('error' in auth) return auth.error
 
-  let claim = await getLatestSubmittedClaim()
+  const demoHost = await getDemoHost()
+
+  // Showcase claim (amount known) wins the projector; else fall back to
+  // the employee-built /file-claim chat flow so /host still shows it.
+  let claim = (await getShowcaseClaim()) ?? (await getLatestSubmittedClaim())
+
   // Host session only. Same startCibaForSubmittedClaim as POST /api/ciba
   // and the claims agent. already_started / hasLiveCiba is a no-op.
   const cibaAutoStart = await autoStartCibaFromHostPoll(claim)
@@ -29,17 +39,29 @@ export async function GET() {
   if (claim && isCibaCatchUpWindow(claim)) {
     claim = (await pollCibaForClaim(claim.id, auth.session.user)) ?? claim
   }
+  // Auto-approved showcase claims (amount <= threshold) skip CIBA entirely,
+  // so pollCibaForClaim's own calendar write (gated on the CIBA branch)
+  // never fires for them — write it here instead.
+  if (
+    claim &&
+    claim.status === 'approved' &&
+    !claim.calendarEventId &&
+    canWriteHostCalendar(auth.session.user, demoHost)
+  ) {
+    await writeHostCalendarEvent(claim.id)
+    claim = (await getClaim(claim.id)) ?? claim
+  }
 
-  const [joiners, board, googleConnected, rulesLocked, cibaLive, settings, demoHost] =
-    await Promise.all([
-      listJoiners(),
-      getCurrentBoard(),
-      isGoogleConnected(),
-      hasCibaCatchUpLock(),
-      hasLiveCiba(),
-      getBoardSettings(),
-      getDemoHost(),
-    ])
+  const [joiners, board, googleConnected, rulesLocked, cibaLive, settings] = await Promise.all([
+    listJoiners(),
+    getCurrentBoard(),
+    isGoogleConnected(),
+    hasCibaCatchUpLock(),
+    hasLiveCiba(),
+    getBoardSettings(),
+  ])
+
+  const selectedSub = claim?.requestedAmount != null ? claim.userId : null
 
   return NextResponse.json(
     {
@@ -54,16 +76,8 @@ export async function GET() {
       canChangeRules: !rulesLocked,
       googleConnected,
       cibaAutoStart,
-      claim: claim
-        ? {
-            id: claim.id,
-            status: claim.status,
-            policyId: claim.policyId,
-            incidentDescription: claim.incidentDescription,
-            calendarEventId: claim.calendarEventId,
-            board: await getCibaBoardSnapshot(claim),
-          }
-        : null,
+      room: await roomStats(joiners, selectedSub),
+      claim: claim ? await claimForBoard(claim) : null,
     },
     { headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' } },
   )

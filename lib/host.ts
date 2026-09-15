@@ -25,10 +25,19 @@ export function envHostEmail(): string | null {
  * can still sit on the CIBA board unless they match the configured
  * demo host.
  */
+/** Optional extra operators: DEMO_ADMIN_EMAILS=a@x.com,b@y.com in .env.local. */
+function envAdminEmails(): string[] {
+  return (process.env.DEMO_ADMIN_EMAILS ?? '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean)
+}
+
 export function isAdminEmail(email?: string | null): boolean {
   const normalized = email?.trim().toLowerCase()
   if (!normalized) return false
   if (normalized === FOCUS_ADMIN_EMAIL) return true
+  if (envAdminEmails().includes(normalized)) return true
   return normalized.endsWith('@okta.com')
 }
 

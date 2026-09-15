@@ -1,6 +1,7 @@
 import { getBoardSettings, getDemoHost } from '@/lib/board-config'
 import { sql } from '@/lib/db'
 import { matchesDemoHost, type DemoHost } from '@/lib/host'
+import type { RoomRequest, RoomStats } from '@/lib/types'
 
 export type Joiner = {
   sub: string
@@ -10,6 +11,9 @@ export type Joiner = {
   pinned: boolean
   joinedAt: string
   lastSeenAt: string
+  requestedAmount: number | null
+  incidentReason: string | null
+  requestedAt: string | null
 }
 
 export type BoardMember = {
@@ -26,6 +30,9 @@ type JoinerRow = {
   pinned: boolean
   joined_at: Date | string
   last_seen_at: Date | string
+  requested_amount: string | number | null
+  incident_reason: string | null
+  requested_at: Date | string | null
 }
 
 function toJoiner(row: JoinerRow): Joiner {
@@ -37,6 +44,9 @@ function toJoiner(row: JoinerRow): Joiner {
     pinned: row.pinned,
     joinedAt: new Date(row.joined_at).toISOString(),
     lastSeenAt: new Date(row.last_seen_at).toISOString(),
+    requestedAmount: row.requested_amount == null ? null : Number(row.requested_amount),
+    incidentReason: row.incident_reason,
+    requestedAt: row.requested_at == null ? null : new Date(row.requested_at).toISOString(),
   }
 }
 
@@ -81,6 +91,77 @@ export async function setJoinerPinned(sub: string, pinned: boolean): Promise<Joi
     returning *
   `) as JoinerRow[]
   return rows[0] ? toJoiner(rows[0]) : null
+}
+
+/** Backs POST /api/join with a body — the audience's showcase request. */
+export async function saveJoinerRequest(
+  sub: string,
+  amount: number,
+  reason: string,
+): Promise<Joiner | null> {
+  const rows = (await sql`
+    update demo_joiners
+    set requested_amount = ${amount}, incident_reason = ${reason}, requested_at = now()
+    where sub = ${sub}
+    returning *
+  `) as JoinerRow[]
+  return rows[0] ? toJoiner(rows[0]) : null
+}
+
+/** POST /api/join/clear — wipes every audience request. Joiners themselves stay. */
+export async function clearJoinerRequests(): Promise<number> {
+  const rows = (await sql`
+    update demo_joiners
+    set requested_amount = null, incident_reason = null, requested_at = null
+    where requested_amount is not null
+    returning sub
+  `) as { sub: string }[]
+  return rows.length
+}
+
+/** Largest amount first, tie broken by earliest requested_at. Shared so the
+ *  /host queue and the showcase pick agree on "biggest request". */
+function byAmountThenEarliest(a: Joiner, b: Joiner): number {
+  const diff = (b.requestedAmount ?? 0) - (a.requestedAmount ?? 0)
+  if (diff !== 0) return diff
+  return (a.requestedAt ?? '').localeCompare(b.requestedAt ?? '')
+}
+
+export async function roomStats(
+  joiners: Joiner[],
+  selectedSub?: string | null,
+): Promise<RoomStats> {
+  const host = await getDemoHost()
+  const inRoom = withoutHost(joiners, host)
+  const withRequests = inRoom.filter((j) => j.requestedAmount != null)
+  const queue: RoomRequest[] = [...withRequests]
+    .sort(byAmountThenEarliest)
+    .slice(0, 8)
+    .map((j) => ({
+      sub: j.sub,
+      name: j.name,
+      amount: j.requestedAmount as number,
+      reason: j.incidentReason ?? '',
+      requestedAt: j.requestedAt as string,
+      selected: j.sub === selectedSub,
+    }))
+  return {
+    joined: inRoom.length,
+    requests: withRequests.length,
+    totalRequested: withRequests.reduce((sum, j) => sum + (j.requestedAmount ?? 0), 0),
+    queue,
+  }
+}
+
+/**
+ * Deterministic showcase pick: largest amount, tie earliest requested_at.
+ * Pass `sub` to force a specific request (the "Pick this" row button).
+ */
+export function pickShowcaseRequest(joiners: Joiner[], sub?: string | null): Joiner | null {
+  const withRequests = joiners.filter((j) => j.requestedAmount != null)
+  if (sub) return withRequests.find((j) => j.sub === sub) ?? null
+  if (withRequests.length === 0) return null
+  return [...withRequests].sort(byAmountThenEarliest)[0]
 }
 
 export async function getLatestPickId(): Promise<string | null> {

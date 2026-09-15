@@ -112,9 +112,12 @@ want an access token for a *separate* API; this app has none.
 
 **Admin access** is email-based, not env-based. A login whose email is
 `@okta.com` or `admin@focusotter.com` can open `/host` and `/settings`.
-On `/host` they save **demo host** email + Auth0 `sub` (sub defaults to
-their own). That identity is excluded from the board; calendar writes
-require the current session `sub` to match the saved demo host sub.
+Optional `DEMO_ADMIN_EMAILS` in `.env.local` (comma-separated) grants
+admin access to additional specific emails, for a demo run without an
+`@okta.com` login. On `/host` an admin saves **demo host** email + Auth0
+`sub` (sub defaults to their own) inside the Pre-show settings drawer.
+That identity is excluded from the approver seat; calendar writes require
+the current session `sub` to match the saved demo host sub.
 `DEMO_HOST_EMAIL` / `DEMO_HOST_SUB` in `.env.local` are an optional seed
 until someone saves on `/host`.
 
@@ -152,9 +155,11 @@ Auth0 picks the channel from `requested_expiry`:
 
 This demo always sends `requested_expiry=600`. `login_hint` is `iss_sub` (that
 board member's Auth0 `sub`), never a raw email. `binding_message` is at most
-64 characters, charset `A-Za-z0-9+-_.,:#`, no spaces
-(`Hulk-smash-claim-<id>`). The authorizing user must have a **verified**
-email or they cannot sit on the board.
+64 characters, charset `A-Za-z0-9+-_.,:#`, no spaces. A showcase claim
+carries the amount (`HeroShield-approve-USD1000000-HS-4A7F`); a chat-filed
+claim falls back to `Hulk-smash-claim-<id>`
+([lib/binding-message.ts](lib/binding-message.ts)). The authorizing user
+must have a **verified** email or they cannot sit on the board.
 
 ### Token Vault — host Google Calendar only
 
@@ -219,10 +224,10 @@ psql "$DATABASE_URL" -f db/schema.sql
 
 | Table | Replaces | Role |
 | ----- | -------- | ---- |
-| `claims` | DynamoDB `claims` | One row per claim; `status` drives the whole demo. CIBA start freezes `ciba_board_size` / `ciba_yes_threshold`. |
+| `claims` | DynamoDB `claims` | One row per claim; `status` drives the whole demo. CIBA start freezes `ciba_board_size` / `ciba_yes_threshold`. A showcase claim also carries `requested_amount`, `customer_name`, `stages` (jsonb log the Claims Supervisor appends to), and `decision` (`auto_approved` \| `exception` \| null); these stay null for a chat-filed `/file-claim` row. |
 | `messages` | DynamoDB `messages` | Chat transcript, so a refresh resumes the claim |
 | `claim_approvals` | AppSync `CLAIM_APPROVAL` events | Unused leftover; cascades on claim delete |
-| `demo_joiners` | — | QR joiners (`sub`, email, name, verified, pinned) |
+| `demo_joiners` | — | QR joiners (`sub`, email, name, verified, pinned), plus each one's showcase request: `requested_amount`, `incident_reason`, `requested_at` |
 | `board_picks` / `board_members` | — | Latest pick of the saved size |
 | `ciba_authorizations` | — | `{authReqId, sub, email, name, status}` per seat |
 | `demo_settings` | — | Host-saved board size, CIBA yes threshold (default 1 / 1), and demo host email/sub |
@@ -270,22 +275,26 @@ Then walk the happy path:
 
 1. `http://localhost:3000` → **Login** → Auth0 Universal Login. A redirect loop
    or a callback error here is almost always a mismatched Allowed Callback URL.
-2. `/settings` → **Connect Google Calendar** (host only). Without this, CIBA
-   emails are withheld.
-3. `/host` → QR is on screen. A second browser opens `/join`, logs in with a
-   **verified** email, and waits.
-4. **Pick board.** Pick replaces the current board until CIBA is live.
-   The joiner phone shows "you're on the board." The host is never seated.
-5. `/file-claim` → describe the Hulk incident. Confirm submission. The
-   filer session does not start CIBA (`startCibaForSubmittedClaim`
-   requires the host). With `/host` open, `GET /api/board` calls the same
-   `startCibaForSubmittedClaim` as `POST /api/ciba`. If start is blocked
-   (no Google, no/short board, already live, Auth0), the agent says the
-   operator console will start it. Host **Send CIBA** is only a fallback
-   when auto-start failed. Emails go out to the seated board
-   (`requested_expiry=600`). The projector ticks as they Accept.
-6. Yeses ≥ the saved threshold → claim `approved`, confetti, calendar event
-   on the host Google account. CIBA board yeses are the grant.
+2. `/host` (admin login) → expand **Pre-show settings** → **Connect Google
+   Calendar** (host only). Without this, CIBA emails are withheld. Save
+   **Demo host**, then **Seat approver** (default board size 1).
+3. A second browser opens `/join`, logs in, and submits an amount + a
+   reason. The phone flips to "You're in" and echoes the room's totals.
+4. Back on `/host`, the intake stage shows the request in the queue. Tap
+   **Pick showcase request**: it picks the room's largest amount (here,
+   the only one) and creates the claim.
+5. The projector runs the five specialist stages live, then resolves:
+   - **At or below $100,000:** the claim auto-approves immediately: no
+     CIBA, straight to the outcome panel.
+   - **Above $100,000:** the exception panel appears and `/host`'s next
+     poll auto-starts CIBA: one approval email to the seated human
+     approver (`requested_expiry=600`). The seat's `/join` phone shows
+     "You're the human approver"; opening the email and tapping Approve
+     releases the claim. Host **Send CIBA** is only a fallback if
+     auto-start was blocked (no Google, no seat, Auth0 error).
+6. Approval (human or automatic) resolves to `approved`, and a Token Vault
+   calendar event lands on the host Google account:
+   `Repair inspection — claim HS-XXXX`.
 
 ### Troubleshooting
 
@@ -297,13 +306,14 @@ Then walk the happy path:
 | Sign-in works but every page 401s | App created as a SPA — recreate it as a Regular Web Application |
 | Agent replies "Sorry, I encountered an error" | Missing/expired `AI_GATEWAY_API_KEY` or `VERCEL_OIDC_TOKEN`; check the server log for `Agent error:` |
 | `relation "claims" does not exist` | Step 2's migration never ran against the branch this `DATABASE_URL` points at |
-| Approvals never release the claim | Need the host-saved yes threshold (default 1) from the seated board (default 1). Raise both on `/host` for the talk. |
-| Host console 403 / redirected to /join | Login email is not `@okta.com` or `admin@focusotter.com` |
-| CIBA emails never send | `/host` is not open (auto-start is the host poll), host has not connected Google, no board picked, leftover host-only seat, or `requested_expiry` is ≤300 (Guardian) |
-| CIBA emailed the presenter | Demo host not saved on `/host`, or leftover `board_members` row; Start over clears the seated board |
+| Approvals never release the claim | Need the host-saved approvals-needed count (default 1) from the seated approver seats (default 1). Raise both in Pre-show settings for the talk. |
+| Host console 403 / redirected to /join | Login email is not `@okta.com`, `admin@focusotter.com`, or listed in `DEMO_ADMIN_EMAILS` |
+| **Pick showcase request** disabled | No requests in the room yet, or a showcase claim already exists on stage; tap **Start over** first |
+| CIBA emails never send | The showcase claim is at or below $100,000 (it auto-approves, no CIBA), `/host` is not open (auto-start is the host poll), host has not connected Google, no approver seated, leftover host-only seat, or `requested_expiry` is ≤300 (Guardian) |
+| CIBA emailed the presenter | Demo host not saved on `/host`, or leftover `board_members` row; Start over clears the seated approver |
 | Auth0 `slow_down` on stage | Polls must honor stored `interval_sec` (floor 5). Do not reset after `authorization_pending`. |
-| Board member missing from pick | Email not verified on the Auth0 user, or they are the configured host |
-| Calendar event missing after the threshold yeses | Token Vault Google connection dropped; reconnect on `/settings` |
+| Approver missing from seat | Email not verified on the Auth0 user, or they are the configured host |
+| Calendar event missing after approval | Token Vault Google connection dropped; reconnect on `/settings`. Applies to an auto-approved claim too, not only a CIBA yes |
 
 ---
 
@@ -312,13 +322,21 @@ Then walk the happy path:
 **Start over (host only).** On `/file-claim` or `/host`, Focus taps **Start
 over** and confirms. That deletes the claim the projector is showing —
 every `awaiting_approval` or `approved` row, **including approved +
-`calendar_event_id`** — plus the host's latest unapproved chat **and
-the seated board** (`board_picks` / `board_members`). Leftover host
-seats are why CIBA mailed the operator. Cascades `messages`,
+`calendar_event_id`**, plus the host's latest unapproved chat, **every
+showcase claim** (`requested_amount is not null`, any status), **and
+the seated approver seat** (`board_picks` / `board_members`). Leftover
+host seats are why CIBA mailed the operator. Cascades `messages`,
 `ciba_authorizations`, and leftover `claim_approvals`. Does **not**
-delete the Google Calendar event. Joiners, `demo_settings`, Token Vault
-/ Google, and Auth0 users stay. Audience and joiners cannot call this;
-`POST /api/claims/reset` is host-gated.
+delete the Google Calendar event. Joiners (and their submitted requests),
+`demo_settings`, Token Vault / Google, and Auth0 users stay. Audience and
+joiners cannot call this; `POST /api/claims/reset` is host-gated.
+
+**Clear room requests (host only).** `POST /api/join/clear`, wired to the
+**Clear room requests** button in Pre-show settings, nulls out every
+joiner's `requested_amount` / `incident_reason` / `requested_at` so the
+room can submit fresh. Joiners themselves, the seated approver, and any
+showcase claim already on stage are untouched; use **Start over** for
+those.
 
 **Full room wipe** (joiners and board too) via Neon MCP `run_sql`, or:
 

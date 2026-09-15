@@ -1,7 +1,14 @@
 import { clearSeatedBoard } from '@/lib/board'
 import { ensureBoardRulesSchema } from '@/lib/board-config'
 import { sql } from '@/lib/db'
-import type { ChatMessage, CibaBlockReason, Claim, ClaimStatus } from '@/lib/types'
+import type {
+  ChatMessage,
+  CibaBlockReason,
+  Claim,
+  ClaimDecision,
+  ClaimStage,
+  ClaimStatus,
+} from '@/lib/types'
 
 type ClaimRow = {
   id: string
@@ -17,6 +24,29 @@ type ClaimRow = {
   ciba_block_reason: string | null
   ciba_board_size: number | null
   ciba_yes_threshold: number | null
+  requested_amount: string | number | null
+  customer_name: string | null
+  stages: unknown
+  decision: string | null
+}
+
+// ponytail: jsonb comes back parsed from the HTTP driver in practice, but the
+// contract doesn't guarantee it — handle the string form too rather than crash.
+function parseStages(value: unknown): ClaimStage[] {
+  if (Array.isArray(value)) return value as ClaimStage[]
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
+    }
+  }
+  return []
+}
+
+function toDecision(value: string | null): ClaimDecision {
+  return value === 'auto_approved' || value === 'exception' ? value : null
 }
 
 function toClaim(row: ClaimRow): Claim {
@@ -39,6 +69,10 @@ function toClaim(row: ClaimRow): Claim {
       row.ciba_board_size == null ? null : Number(row.ciba_board_size),
     cibaYesThreshold:
       row.ciba_yes_threshold == null ? null : Number(row.ciba_yes_threshold),
+    requestedAmount: row.requested_amount == null ? null : Number(row.requested_amount),
+    customerName: row.customer_name,
+    stages: parseStages(row.stages),
+    decision: toDecision(row.decision),
   }
 }
 
@@ -167,6 +201,80 @@ export async function attachCalendarEvent(
   return rows.length > 0
 }
 
+/** Operator "Pick showcase request" creates the row the Claims Supervisor processes. */
+export async function createShowcaseClaim(input: {
+  userId: string
+  policyId: string
+  customerName: string
+  requestedAmount: number
+  reason: string
+}): Promise<Claim> {
+  await ensureBoardRulesSchema()
+  const rows = (await sql`
+    insert into claims (
+      user_id, policy_id, customer_name, requested_amount, incident_description, stages
+    )
+    values (
+      ${input.userId}, ${input.policyId}, ${input.customerName},
+      ${input.requestedAmount}, ${input.reason}, '[]'::jsonb
+    )
+    returning *
+  `) as ClaimRow[]
+  return toClaim(rows[0])
+}
+
+/** Atomic jsonb append so concurrent stage writes never clobber each other. */
+export async function appendClaimStage(claimId: string, stage: ClaimStage): Promise<void> {
+  await sql`
+    update claims
+    set stages = stages || ${JSON.stringify([stage])}::jsonb, updated_at = now()
+    where id = ${claimId}
+  `
+}
+
+export async function setClaimDecision(
+  claimId: string,
+  decision: ClaimDecision,
+  status: ClaimStatus,
+): Promise<Claim | null> {
+  await ensureBoardRulesSchema()
+  const rows = (await sql`
+    update claims
+    set decision = ${decision}, status = ${status}, updated_at = now()
+    where id = ${claimId}
+    returning *
+  `) as ClaimRow[]
+  return rows[0] ? toClaim(rows[0]) : null
+}
+
+/** amount <= HUMAN_AUTHORITY_THRESHOLD — policy code decides, not the model. */
+export async function autoApproveClaim(claimId: string): Promise<Claim | null> {
+  return setClaimDecision(claimId, 'auto_approved', 'approved')
+}
+
+/** All CIBA seats resolved with fewer yeses than the threshold and nothing pending. */
+export async function denyClaim(claimId: string): Promise<Claim | null> {
+  await ensureBoardRulesSchema()
+  const rows = (await sql`
+    update claims set status = 'denied', updated_at = now()
+    where id = ${claimId} and status = 'awaiting_approval'
+    returning *
+  `) as ClaimRow[]
+  return rows[0] ? toClaim(rows[0]) : null
+}
+
+/** Latest showcase claim, any status — powers /host and /api/join. */
+export async function getShowcaseClaim(): Promise<Claim | null> {
+  await ensureBoardRulesSchema()
+  const rows = (await sql`
+    select * from claims
+    where requested_amount is not null
+    order by created_at desc
+    limit 1
+  `) as ClaimRow[]
+  return rows[0] ? toClaim(rows[0]) : null
+}
+
 export async function getLatestSubmittedClaim(): Promise<Claim | null> {
   await ensureBoardRulesSchema()
   const rows = (await sql`
@@ -192,6 +300,10 @@ export type ClearedClaim = {
  * `ciba_authorizations`, and leftover `claim_approvals` cascade from
  * `claims`. Does not delete the Google Calendar event.
  *
+ * Also deletes every showcase claim (requested_amount is not null, any
+ * status) so "Start over" clears the /host stage too. Joiner requests
+ * (demo_joiners) stay — use POST /api/join/clear for those.
+ *
  * Does not touch demo_joiners, demo_settings, Token Vault, or Auth0 users.
  */
 export async function clearCurrentClaims(hostUserId: string): Promise<ClearedClaim[]> {
@@ -212,8 +324,13 @@ export async function clearCurrentClaims(hostUserId: string): Promise<ClearedCla
     limit 1
   `) as { id: string; status: ClaimStatus }[]
 
+  const showcaseRows = (await sql`
+    select id, status from claims
+    where requested_amount is not null
+  `) as { id: string; status: ClaimStatus }[]
+
   const byId = new Map<string, ClaimStatus>()
-  for (const row of [...projectorRows, ...openRows]) {
+  for (const row of [...projectorRows, ...openRows, ...showcaseRows]) {
     byId.set(row.id, row.status)
   }
 

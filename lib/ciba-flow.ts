@@ -15,6 +15,7 @@ import {
 import {
   approveClaim,
   attachCalendarEvent,
+  denyClaim,
   getClaim,
   setCibaBlockReason,
 } from '@/lib/claims'
@@ -29,7 +30,7 @@ import {
   isFullBoard,
 } from '@/lib/board-config'
 import { canWriteHostCalendar, isAdmin, matchesDemoHost } from '@/lib/host'
-import type { CibaAutoStart, Claim } from '@/lib/types'
+import { claimCode, type CibaAutoStart, type Claim } from '@/lib/types'
 
 export type { CibaAutoStart, CibaStartFailReason } from '@/lib/types'
 export type CibaStartResult = CibaAutoStart
@@ -177,7 +178,7 @@ export async function startCibaForSubmittedClaim(claimId: string): Promise<CibaS
   }
 
   await setCibaBlockReason(claimId, null)
-  const bindingMessage = bindingMessageForClaim(claimId)
+  const bindingMessage = bindingMessageForClaim(claim)
   let started = 0
 
   for (const member of board) {
@@ -265,12 +266,28 @@ export async function pollCibaForClaim(
     if (canWriteHostCalendar(actor, await getDemoHost())) {
       await writeHostCalendarEvent(claimId)
     }
+  } else {
+    // Every seated member has answered (nothing left pending) and the room
+    // still fell short of the yes threshold — decline instead of leaving
+    // the exception stuck forever waiting on a seat that already said no.
+    const rows = await listCibaForClaim(claimId)
+    const stillPending = rows.some((row) => row.status === 'pending')
+    const someoneDeclined = rows.some((row) => row.status === 'denied')
+    if (someoneDeclined && !stillPending) {
+      await denyClaim(claimId)
+    }
   }
 
   return getClaim(claimId)
 }
 
-async function writeHostCalendarEvent(claimId: string): Promise<void> {
+/**
+ * Writes the Token Vault calendar event once a claim is approved. Showcase
+ * claims (requestedAmount set) get the "Repair inspection" title driven by
+ * the Repair Specialist stage; the /file-claim chat path keeps its
+ * original title and description untouched.
+ */
+export async function writeHostCalendarEvent(claimId: string): Promise<void> {
   const claim = await getClaim(claimId)
   if (!claim || claim.calendarEventId) return
 
@@ -285,10 +302,24 @@ async function writeHostCalendarEvent(claimId: string): Promise<void> {
   const start = new Date()
   const end = new Date(start.getTime() + 30 * 60 * 1000)
 
-  try {
-    const event = await createEvent(token, {
-      summary: `Hero Shield claim approved · ${claim.policyId}`,
-      description: [
+  const isShowcase = claim.requestedAmount != null
+  const summary = isShowcase
+    ? `Repair inspection — claim ${claimCode(claim.id)}`
+    : `Hero Shield claim approved · ${claim.policyId}`
+
+  const description = isShowcase
+    ? [
+        claim.customerName ? `Customer: ${claim.customerName}` : null,
+        `Amount: $${claim.requestedAmount!.toLocaleString('en-US')}`,
+        claim.incidentDescription ? `Reason: ${claim.incidentDescription}` : null,
+        claim.decision === 'exception'
+          ? `Authorized by ${yeses || 'the human approver'}`
+          : 'Auto-approved under the $100,000 policy threshold',
+        `Claim ${claimCode(claim.id)}`,
+      ]
+        .filter(Boolean)
+        .join('\n')
+    : [
         claim.incidentDescription ?? 'Superhero incident',
         claim.incidentLocation ? `Location: ${claim.incidentLocation}` : null,
         claim.damageExtent ? `Damage: ${claim.damageExtent}` : null,
@@ -296,7 +327,12 @@ async function writeHostCalendarEvent(claimId: string): Promise<void> {
         `Claim ${claim.id}`,
       ]
         .filter(Boolean)
-        .join('\n'),
+        .join('\n')
+
+  try {
+    const event = await createEvent(token, {
+      summary,
+      description,
       location: claim.incidentLocation ?? undefined,
       startDateTime: start.toISOString(),
       endDateTime: end.toISOString(),

@@ -76,6 +76,13 @@ export async function ensureBoardRulesSchema(): Promise<void> {
   await sql`alter table claims add column if not exists ciba_yes_threshold integer`
   await sql`alter table demo_settings add column if not exists demo_host_email text`
   await sql`alter table demo_settings add column if not exists demo_host_sub text`
+  await sql`alter table claims add column if not exists requested_amount numeric(12,2)`
+  await sql`alter table claims add column if not exists customer_name text`
+  await sql`alter table claims add column if not exists stages jsonb not null default '[]'`
+  await sql`alter table claims add column if not exists decision text`
+  await sql`alter table demo_joiners add column if not exists requested_amount numeric(12,2)`
+  await sql`alter table demo_joiners add column if not exists incident_reason text`
+  await sql`alter table demo_joiners add column if not exists requested_at timestamptz`
   schemaReady = true
 }
 
